@@ -1,0 +1,44 @@
+{
+  "name": "pi-hibiki",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hibiki · 模型工作台 — model selection, provider/model management and session Fast policy",
+  "type": "module",
+  "license": "MIT",
+  "author": "Wang Jiacong (theseussss)",
+  "engines": {
+    "node": ">=24"
+  },
+  "keywords": [
+    "pi-package",
+    "models",
+    "tui"
+  ],
+  "files": [
+    "extensions",
+    "lib",
+    "licenses",
+    "examples",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/hibiki-models.ts"
+    ],
+    "themes": []
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "test": "node scripts/test.mjs",
+    "verify": "node scripts/verify.mjs"
+  }
+}
