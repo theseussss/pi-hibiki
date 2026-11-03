@@ -1,408 +1,294 @@
 import assert from 'node:assert/strict';
-import { piRoot as resolvePiRoot } from '../scripts/tooling.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { loadTypeScript } from './model-pick-loader.mjs';
-import { createSyntheticProtection } from './model-pick-synthetic-protection.mjs';
-import { plain as stripAnsi, paint } from './model-pick-ui-harness.mjs';
+import { harness, tui } from './model-pick-ui-harness.mjs';
 
-// Execute the isolated candidate against synthetic registry/files only. No session,
-// credentials, network request, or live settings are read by the extension here.
-const extensionPath = fileURLToPath(new URL('../extensions/model-pick.ts', import.meta.url));
-const piRoot = resolvePiRoot();
-const tui = await import(pathToFileURL(path.join(piRoot, 'node_modules/@earendil-works/pi-tui/dist/index.js')));
-const keys = { up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C', enter: '\r' };
-
-function makeModels(counts) {
-  return counts.flatMap((count, index) => Array.from({ length: count }, (_, col) => ({
-    provider: `p${String(index).padStart(2, '0')}`,
-    id: `model-${index}-${col}`,
-    name: `model-${index}-${col}`,
-    api: 'openai-completions',
-    contextWindow: 128000,
-    maxTokens: 8192,
-    reasoning: false,
-    input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+// All navigation runs through the production host + real task controller + formal
+// component. Selection is observed in rendered text/geometry, never private state.
+async function open(t, counts, currentIndex = 0, options = {}) {
+  const models = counts.flatMap((count, index) => Array.from({ length: count }, (_, col) => ({
+    provider: `p${String(index).padStart(2, '0')}`, id: `model-${index}-${col}`, name: `model-${index}-${col}`,
+    contextWindow: 128000, maxTokens: 8192, reasoning: false, input: ['text'],
   })));
+  const config = { futureRoot: { keep: true }, providers: Object.fromEntries(counts.map((_, index) => {
+    const provider = `p${String(index).padStart(2, '0')}`;
+    return [provider, { name: provider, api: 'openai-completions', baseUrl: 'https://example.test/v1', models: models.filter(m => m.provider === provider) }];
+  })) };
+  const p = await harness(t, { config, currentRef: models[currentIndex], ...options, fixtureFiles: {
+    'settings.json': {}, 'model-pick-favorites.json': [], 'model-pick-order.json': {}, ...options.fixtureFiles,
+  } });
+  p.selectedLabel = () => {
+    const lines = p.lines(), rules = lines.flatMap((line, i) => /^\s*─+\s*$/u.test(line) ? [i] : []);
+    // Native query has a static › prompt; only matrix rows carry selection.
+    const matrix = lines.slice(rules[1] + 1, rules[2]).join('\n');
+    const match = matrix.match(/›\s+(?:●\s+)?(model-\d+-\d+|p\d+)|▸\s+\[(p\d+)\]/);
+    return match?.[1] ?? match?.[2];
+  };
+  p.provider = () => { const label = p.selectedLabel(); return label?.startsWith('model-') ? `p${label.split('-')[1].padStart(2, '0')}` : label; };
+  p.focus = () => p.selectedLabel()?.startsWith('model-') ? 'model' : p.selectedLabel()?.startsWith('p') ? 'provider' : 'none';
+  const files = () => {
+    const result = new Map();
+    const visit = relative => {
+      for (const entry of fs.readdirSync(path.join(p.root, relative), { withFileTypes: true })) {
+        const name = path.join(relative, entry.name);
+        if (entry.isDirectory()) visit(name); else result.set(name, fs.readFileSync(path.join(p.root, name)));
+      }
+    };
+    visit(''); return result;
+  };
+  const initialFiles = files();
+  p.noEffects = (allowedFiles = []) => {
+    assert.equal(p.calls.length, 0); assert.equal(p.authCalls(), 0); assert.equal(p.selections.length, 0); assert.deepEqual(p.config(), config);
+    const after = files();
+    for (const name of new Set([...initialFiles.keys(), ...after.keys()])) {
+      if (!allowedFiles.includes(name)) assert.deepEqual(after.get(name), initialFiles.get(name), `unexpected file effect: ${name}`);
+    }
+  };
+  return p;
 }
+const json = (p, name) => JSON.parse(fs.readFileSync(path.join(p.root, name), 'utf8'));
+const activeActions = p => p.debug().actionSlots.filter(s => s.actionIndex !== null).map(s => s.key);
 
-async function open(counts, currentIndex = 0, options = {}) {
-  const models = makeModels(counts);
-  const commands = new Map();
-  const notifications = [];
-  const mutations = [];
-  const selected = [];
-  const actionCalls = [];
-  const root = '/synthetic-model-pick-home/.pi/agent';
-  const files = new Map([
-    [path.join(root, 'settings.json'), '{}'],
-    [path.join(root, 'models.json'), JSON.stringify({
-      providers: Object.fromEntries(counts.map((count, index) => [
-        `p${String(index).padStart(2, '0')}`,
-        { api: 'openai-completions', baseUrl: 'https://example.test/v1', models: models.filter((m) => m.provider === `p${String(index).padStart(2, '0')}`) },
-      ])),
-    })],
-  ]);
-  const checkPath = (p) => {
-    assert.ok(String(p) === root || String(p).startsWith(`${root}/`), `unexpected file access: ${p}`);
-    return String(p);
-  };
-  const descriptors = new Map();
-  const stat = (key) => ({ isFile: () => key !== root, isDirectory: () => key === root, isSymbolicLink: () => false, size: Buffer.byteLength(files.get(key) ?? ''), mode: key === root ? 0o40700 : 0o100600, nlink: 1, ino: [...files.keys()].indexOf(key) + 10, dev: 1, mtimeMs: 0, ctimeMs: 0 });
-  const fakeFs = {
-    constants: fs.constants,
-    existsSync(p) { return files.has(checkPath(p)) || p === root; },
-    lstatSync(p) {
-      if (p === '/' || root.startsWith(String(p) + '/')) return { isFile: () => false, isDirectory: () => true, isSymbolicLink: () => false, size: 0, mode: 0o40700, nlink: 1 };
-      const key = checkPath(p);
-      if (key !== root && !files.has(key)) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
-      return stat(key);
-    },
-    openSync(p) {
-      const key = checkPath(p);
-      if (!files.has(key)) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
-      const fd = descriptors.size + 100; descriptors.set(fd, key); return fd;
-    },
-    fstatSync(fd) { assert.ok(descriptors.has(fd)); return stat(descriptors.get(fd)); },
-    closeSync(fd) { assert.ok(descriptors.delete(fd)); },
-    readFileSync(p) {
-      const key = typeof p === 'number' ? descriptors.get(p) : checkPath(p);
-      if (!files.has(key)) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
-      return typeof p === 'number' ? Buffer.from(files.get(key)) : files.get(key);
-    },
-    readdirSync(p) {
-      assert.equal(checkPath(p), `${root}/sessions`);
-      return [];
-    },
-    writeFileSync(p, value) { mutations.push(['write', checkPath(p), value]); },
-    copyFileSync(a, b) { mutations.push(['copy', checkPath(a), checkPath(b)]); },
-    renameSync(a, b) { mutations.push(['rename', checkPath(a), checkPath(b)]); },
-  };
-  class RecordingActions {
-    active = false;
-    undoLabel = null;
-    setFocused() {}
-    dispose() {}
-    open(target, intent) { actionCalls.push({ target: { ...target }, intent }); }
-    undoLast() { actionCalls.push({ undo: true }); }
-  }
-  const extension = loadTypeScript(extensionPath, {
-    'node:fs': fakeFs,
-    'node:os': { homedir: () => '/synthetic-model-pick-home' },
-    '@earendil-works/pi-tui': tui,
-    '@earendil-works/pi-ai/providers/all': { getBuiltinProviders: () => [] },
-    '../lib/model-pick/protection.js': { createRecordProtection: createSyntheticProtection },
-    ...(options.recordActions ? { '../lib/model-pick/panel.js': { PickerActions: RecordingActions } } : {}),
-  }, {
-    setTimeout() { throw new Error('navigation must not create timers'); },
-    clearTimeout() { throw new Error('navigation must not create timers'); },
-  });
-  extension.default({
-    registerCommand(name, command) { commands.set(name, command); },
-    registerShortcut() {},
-    async setModel(model) { selected.push(model); return true; },
-  });
-  let panel;
-  let finish;
-  let signalOpened;
-  const opened = new Promise((resolve) => { signalOpened = resolve; });
-  let renders = 0;
-  const running = commands.get('models').handler('', {
-    hasUI: true,
-    model: models[currentIndex],
-    modelRegistry: { async refresh() {}, getAvailable: () => models },
-    ui: {
-      notify(...args) { notifications.push(args); },
-      custom(factory) {
-        return new Promise((resolve) => {
-          finish = resolve;
-          panel = factory({ terminal: options.terminalRows ? { rows: options.terminalRows } : undefined, requestRender() { renders++; } }, { bold: (s) => s, fg: paint }, {}, resolve);
-          signalOpened();
-        });
-      },
-    },
-  });
-  // Wait for the actual panel callback, not a guessed number of microtasks.
-  await Promise.race([opened, running.then(() => { throw new Error('picker exited before opening'); })]);
-  assert.ok(panel);
-  return {
-    send(key) { panel.handleInput(keys[key] ?? key); },
-    lines: (width = 180) => panel.render(width).map(stripAnsi),
-    raw: (width = 180) => panel.render(width),
-    focus() { return /^ 供应商「/.test(this.detail()) ? 'provider' : 'model'; },
-    provider() {
-      const line = this.lines().find((s) => s.startsWith(' ▸ '));
-      return line?.match(/p\d+/)?.[0];
-    },
-    detail() { return this.lines().at(-2); },
-    async close() { finish(null); await running; },
-    async confirm() { this.send('enter'); await running; return selected[0]; },
-    mutations, notifications, selected, actionCalls,
-    renders: () => renders,
-  };
-}
-
-test('top Up wraps to last provider and keeps its model selected', async () => {
-  const p = await open([1, 1, 1]);
-  assert.equal(p.provider(), 'p00');
-  p.send('up');
-  assert.equal(p.provider(), 'p02');
-  assert.match(p.detail(), /model-2-0/);
-  assert.equal((await p.confirm()).id, 'model-2-0');
-  assert.equal(p.mutations.length, 0);
+test('top Up wraps to last provider and switches the freshly selected model', async t => {
+  const p = await open(t, [1, 1, 1]);
+  assert.equal(p.provider(), 'p00'); p.send('up'); assert.equal(p.provider(), 'p02');
+  assert.equal(p.selectedLabel(), 'model-2-0'); p.send('enter'); await p.finished;
+  assert.equal(p.selections[0].id, 'model-2-0'); assert.equal(p.calls.length, 0);
 });
-
-test('last Down wraps to first provider', async () => {
-  const p = await open([1, 1, 1], 2);
-  p.send('down');
-  assert.equal(p.provider(), 'p00');
-  await p.close();
+test('last Down wraps to first provider', async t => {
+  const p = await open(t, [1, 1, 1], 2); p.send('down'); assert.equal(p.provider(), 'p00'); p.noEffects();
 });
-
-test('more than PAGE rows scrolls wrapped selection into view in either direction', async () => {
-  const p = await open(Array(23).fill(1));
-  p.send('up');
-  assert.equal(p.provider(), 'p22');
-  assert.equal(p.lines().filter((s) => /p\d+/.test(s)).length, 18);
-  assert.ok(p.lines().some((s) => s.includes('p05')));
-  assert.ok(!p.lines().some((s) => s.includes('p00')));
-  p.send('down');
-  assert.equal(p.provider(), 'p00');
-  assert.ok(p.lines().some((s) => s.includes('p17')));
-  assert.ok(!p.lines().some((s) => s.includes('p22')));
-  assert.equal(p.mutations.length, 0);
-  await p.close();
+test('more than one viewport scrolls wrapped selection into view in both directions', async t => {
+  const p = await open(t, Array(23).fill(1));
+  p.send('up'); assert.equal(p.provider(), 'p22'); assert.ok(p.debug().offset > 0); assert.ok(!p.lines().some(line => /^\s+p00\s/.test(line)));
+  p.send('down'); assert.equal(p.provider(), 'p00'); assert.ok(!p.screen().includes('model-22-0')); p.noEffects();
 });
-
-test('Up wrap clamps the model column for a shorter destination row', async () => {
-  const p = await open([4, 1, 2]);
-  p.send('right'); p.send('right'); p.send('right');
-  assert.match(p.detail(), /model-0-3/);
-  p.send('up');
-  assert.equal(p.provider(), 'p02');
-  assert.match(p.detail(), /model-2-1/);
-  await p.close();
+test('Up wrap clamps the selected ordinal for a shorter destination provider', async t => {
+  const p = await open(t, [4, 1, 2]);
+  p.send('right'); p.send('right'); p.send('right'); assert.equal(p.selectedLabel(), 'model-0-3');
+  p.send('up'); assert.equal(p.selectedLabel(), 'model-2-1'); p.noEffects();
 });
-
-test('non-edge navigation retains normal row and column behavior', async () => {
-  const p = await open([3, 3, 3], 3);
-  p.send('right');
-  p.send('down');
-  assert.equal(p.provider(), 'p02');
-  assert.match(p.detail(), /model-2-1/);
-  p.send('up');
-  assert.equal(p.provider(), 'p01');
-  assert.match(p.detail(), /model-1-1/);
-  await p.close();
+test('non-edge navigation retains row and ordinal column', async t => {
+  const p = await open(t, [3, 3, 3], 3);
+  p.send('right'); p.send('down'); assert.equal(p.selectedLabel(), 'model-2-1');
+  p.send('up'); assert.equal(p.selectedLabel(), 'model-1-1'); p.noEffects();
 });
-
-test('search navigation wraps only among matching providers', async () => {
-  const p = await open(Array(23).fill(1));
-  for (const c of 'p1') p.send(c);
-  const matchingRows = p.lines().filter((line) => /\bp\d+/.test(line));
-  assert.ok(matchingRows.length > 1 && matchingRows.length < 23);
-  assert.ok(!matchingRows.some((line) => line.includes('p00')));
-  const first = p.provider();
-  const expectedLast = matchingRows.at(-1).match(/p\d+/)[0];
-  p.send('up');
-  assert.equal(p.provider(), expectedLast);
-  assert.notEqual(p.provider(), first);
-  p.send('down');
-  assert.equal(p.provider(), first);
-  await p.close();
+test('search navigation wraps only among fuzzy matching providers', async t => {
+  const p = await open(t, Array(23).fill(1)); p.type('p1');
+  const providers = [...new Set(p.debug().matrixCells.map(c => c.pid))];
+  assert.ok(providers.length > 1 && providers.length < 23); assert.ok(!providers.includes('p00'));
+  const first = p.provider(); // Native query owns text cursor, arrows navigate immediately.
+  p.send('up'); assert.equal(p.provider(), providers.at(-1)); assert.notEqual(p.provider(), first);
+  p.send('down'); assert.equal(p.provider(), first); p.noEffects();
 });
-
-test('single-row navigation stays on its only row', async () => {
-  const p = await open([2]);
-  for (const key of ['up', 'down', 'up', 'down']) {
-    p.send(key);
-    assert.equal(p.provider(), 'p00');
-  }
-  await p.close();
+test('single-provider navigation stays on its only row', async t => {
+  const p = await open(t, [2]); for (const key of ['up', 'down', 'up', 'down']) { p.send(key); assert.equal(p.provider(), 'p00'); } p.noEffects();
 });
-
-test('empty search results ignore arrows and Enter without selecting or writing', async () => {
-  const p = await open([2, 1]);
-  for (const c of 'zzzzzzzzzz') p.send(c);
+test('empty search ignores arrows and Enter without selecting, publishing drafts or writing', async t => {
+  const p = await open(t, [2, 1]); p.type('zzzzzzzzzz'); p.send('enter');
   for (const key of ['up', 'down', 'left', 'right', 'enter']) p.send(key);
-  assert.equal(p.provider(), undefined);
-  assert.ok(p.lines().some((s) => s.includes('无匹配模型')));
-  assert.equal(p.selected.length, 0);
-  assert.equal(p.mutations.length, 0);
-  await p.close();
+  assert.equal(p.provider(), undefined); assert.match(p.screen(), /没有匹配/); assert.equal(p.debug().view, 'matrix'); p.noEffects();
 });
-
-test('enhanced CSI Up/Down follow the same wrapping path', async () => {
-  const p = await open([1, 1]);
-  p.send('\x1b[1;1A');
-  assert.equal(p.provider(), 'p01');
-  p.send('\x1b[1;1B');
-  assert.equal(p.provider(), 'p00');
-  await p.close();
+test('enhanced CSI Up and Down follow the same wrap path', async t => {
+  const p = await open(t, [1, 1]); p.send('\x1b[1;1A'); assert.equal(p.provider(), 'p01'); p.send('\x1b[1;1B'); assert.equal(p.provider(), 'p00'); p.noEffects();
 });
-
-test('Alt reordering remains non-circular at a provider boundary', async () => {
-  const p = await open([1, 1]);
-  p.send('\x1b[1;3A');
-  assert.equal(p.provider(), 'p00');
-  assert.equal(p.mutations.length, 0);
-  await p.close();
+test('Alt reordering remains non-circular at a provider boundary', async t => {
+  const p = await open(t, [1, 1]); p.send('\x1b[1;3A'); assert.equal(p.provider(), 'p00'); assert.deepEqual(json(p, 'model-pick-order.json'), {}); p.noEffects();
 });
-
-test('two boundary Left presses focus the existing provider column; Right returns to model zero', async () => {
-  const p = await open([2, 1]);
-  assert.equal(p.focus(), 'model');
-  p.send('left');
-  assert.equal(p.focus(), 'model');
-  assert.match(p.lines().at(-1), /再按.*←/);
-  p.send('left');
-  assert.equal(p.focus(), 'provider');
-  assert.match(p.lines().find((line) => line.startsWith(' ▸ ')), /\[p00\]/);
-  assert.ok(!p.lines().some((line) => /› model-0-0/.test(line)));
-  p.send('right');
-  assert.equal(p.focus(), 'model');
-  assert.match(p.detail(), /model-0-0/);
-  assert.equal(p.mutations.length, 0);
-  await p.close();
+test('two deliberate boundary Left presses focus provider; Right returns to model zero', async t => {
+  const p = await open(t, [2, 1]); p.send('left'); assert.equal(p.focus(), 'model');
+  p.send('left'); assert.equal(p.focus(), 'provider'); assert.match(p.screen(), /▸\s+\[p00\]/);
+  p.send('right'); assert.equal(p.selectedLabel(), 'model-0-0'); p.noEffects();
 });
-
-test('arriving at the first model does not count as a boundary Left press', async () => {
-  const p = await open([3]);
-  p.send('right'); p.send('right');
-  p.send('left'); p.send('left');
-  assert.equal(p.focus(), 'model');
-  assert.ok(!p.lines().at(-1).includes('再按'));
-  p.send('left'); assert.equal(p.focus(), 'model');
-  p.send('left'); assert.equal(p.focus(), 'provider');
-  await p.close();
+test('arriving at first model does not count as a boundary Left press', async t => {
+  const p = await open(t, [3]); p.send('right'); p.send('right'); p.send('left'); p.send('left');
+  assert.equal(p.focus(), 'model'); p.send('left'); assert.equal(p.focus(), 'model'); p.send('left'); assert.equal(p.focus(), 'provider'); p.noEffects();
 });
-
-test('other navigation cancels the pending second Left without a timer', async () => {
-  const p = await open([1, 1]);
-  p.send('left'); p.send('down'); p.send('left');
-  assert.equal(p.focus(), 'model');
-  assert.equal(p.provider(), 'p01');
-  p.send('right'); p.send('left');
-  assert.equal(p.focus(), 'model');
-  p.send('left'); assert.equal(p.focus(), 'provider');
-  await p.close();
+test('other navigation cancels pending second Left without a timer', async t => {
+  const p = await open(t, [1, 1]); p.send('left'); p.send('down'); p.send('left'); assert.equal(p.focus(), 'model'); assert.equal(p.provider(), 'p01');
+  p.send('right'); p.send('left'); assert.equal(p.focus(), 'model'); p.send('left'); assert.equal(p.focus(), 'provider'); p.noEffects();
 });
-
-test('Kitty repeat events may move left but never arm or enter the provider column', async () => {
-  const p = await open([3]);
-  p.send('right'); p.send('right');
+test('Kitty repeat may move Left but cannot arm or enter the provider column', async t => {
+  const p = await open(t, [3]); p.send('right'); p.send('right');
   for (let i = 0; i < 8; i++) p.send('\x1b[1;1:2D');
-  assert.equal(p.focus(), 'model');
-  assert.match(p.detail(), /model-0-0/);
-  p.send('left'); p.send('\x1b[1;1:2D'); p.send('left');
-  assert.equal(p.focus(), 'model');
-  p.send('left'); assert.equal(p.focus(), 'provider');
-  await p.close();
+  assert.equal(p.selectedLabel(), 'model-0-0'); p.send('left'); p.send('\x1b[1;1:2D'); p.send('left');
+  assert.equal(p.focus(), 'model'); p.send('left'); assert.equal(p.focus(), 'provider'); p.noEffects();
+});
+test('Kitty releases neither navigate nor cancel two deliberate Left presses', async t => {
+  const p = await open(t, [1]); p.send('\x1b[1;1:1D'); p.send('\x1b[1;1:3D'); assert.equal(p.focus(), 'model');
+  p.send('\x1b[1;1:1D'); assert.equal(p.focus(), 'provider'); p.send('\x1b[1;1:3C'); assert.equal(p.focus(), 'provider');
+  p.send('right'); assert.equal(p.focus(), 'model'); p.noEffects();
+});
+test('provider focus preserves circular row navigation and reveals its target', async t => {
+  const p = await open(t, Array(23).fill(1)); p.send('left'); p.send('left'); p.send('up');
+  assert.equal(p.focus(), 'provider'); assert.equal(p.provider(), 'p22'); p.send('down'); assert.equal(p.provider(), 'p00');
+  p.send('right'); assert.equal(p.selectedLabel(), 'model-0-0'); p.noEffects();
+});
+test('same add/remove keys use real model versus provider workspaces', async t => {
+  const p = await open(t, [2, 1]); p.send('\x1bn'); assert.equal(p.debug().view, 'basket'); p.send('cancel');
+  p.send('\x1bx'); assert.equal(p.debug().view, 'confirm'); assert.match(p.readContent(), /model-0-0/); p.action('cancel-confirm');
+  p.send('left'); p.send('left'); p.send('down'); p.send('\x1bn'); assert.equal(p.debug().view, 'connection'); p.send('cancel');
+  p.send('\x1bx'); assert.equal(p.debug().view, 'confirm'); assert.match(p.readContent(), /p01/); p.action('cancel-confirm');
+  p.send('\x1b\x01'); p.send('\x1b\x18'); assert.equal(p.debug().view, 'matrix'); p.noEffects();
+});
+test('an actually empty registry permits new-provider action without an existing row', async t => {
+  const p = await open(t, []); assert.match(p.screen(), /还没有供应商|暂无供应商/);
+  p.action('new-provider'); assert.equal(p.debug().view, 'connection'); p.send('cancel');
+  p.send('\x1bx'); assert.equal(p.debug().view, 'matrix'); p.noEffects();
+  p.send('\x1bn'); assert.equal(p.debug().view, 'connection', 'legacy add must remain reachable with an empty registry');
+});
+test('zero matches never masquerade as no configured providers', async t => {
+  const p = await open(t, [1, 1]); p.type('zzzzzzzzzz'); p.send('enter'); p.send('left'); p.send('left'); p.send('enter');
+  assert.equal(p.debug().view, 'matrix'); assert.match(p.screen(), /没有匹配/); assert.doesNotMatch(p.screen(), /还没有供应商/); p.noEffects();
+});
+test('empty providers expose add-model action and never select a hidden or minus-one model', async t => {
+  const p = await open(t, [0]); assert.equal(p.provider(), 'p00'); assert.equal(p.focus(), 'provider'); assert.match(p.screen(), /添加模型/);
+  p.send('right'); assert.equal(p.focus(), 'provider'); p.action('add-model'); assert.equal(p.debug().view, 'basket'); p.send('cancel'); p.noEffects();
+});
+test('provider template cannot favorite, default or reorder an invisible model', async t => {
+  const p = await open(t, [2, 1]); p.send('left'); p.send('left'); p.send('tab');
+  assert.equal(p.debug().actionMode, true); assert.ok(!activeActions(p).includes('favorite')); assert.ok(!activeActions(p).includes('default'));
+  for (const k of ['\x1b1', '\x1bd', '\x1b[1;3C', '\x1b[1;3D']) p.send(k);
+  assert.deepEqual(json(p, 'model-pick-order.json'), {}); assert.deepEqual(json(p, 'model-pick-favorites.json'), []); assert.deepEqual(json(p, 'settings.json'), {}); p.noEffects();
+});
+test('Enter on provider focuses the scoped workspace; action Enter edits without switching its hidden model', async t => {
+  const p = await open(t, [1]); p.send('left'); p.send('left'); p.send('enter');
+  assert.equal(p.debug().view, 'matrix'); assert.equal(p.debug().actionMode, true); assert.equal(p.debug().selectedAction, 'edit-provider'); p.noEffects();
+  p.send('enter'); assert.equal(p.debug().view, 'edit'); assert.match(p.readContent(), /p00|example.test/); p.noEffects();
+});
+test('small terminals retain focused row and operations at every tested width', async t => {
+  const p = await open(t, Array(23).fill(1), 0, { terminalRows: 16 }); p.send('up'); assert.equal(p.provider(), 'p22');
+  for (const width of [1, 2, 4, 8, 20, 28, 32, 42, 48, 60, 64, 80, 120, 140, 160, 180]) {
+    const lines = p.lines(width); assert.ok(lines.length <= 16); assert.ok(lines.every(line => tui.visibleWidth(line) <= Math.max(0, width - 1)), `width ${width}`);
+  }
+  p.noEffects();
 });
 
-test('Kitty Left key releases neither navigate nor cancel two intentional presses', async () => {
-  const p = await open([1]);
-  p.send('\x1b[1;1:1D'); p.send('\x1b[1;1:3D');
-  assert.equal(p.focus(), 'model');
-  p.send('\x1b[1;1:1D'); assert.equal(p.focus(), 'provider');
-  p.send('\x1b[1;1:3C'); assert.equal(p.focus(), 'provider');
-  p.send('right'); assert.equal(p.focus(), 'model');
-  await p.close();
+test('home Tab/ShiftTab changes regions only; Alt1 persists favorite for selected identity', async t => {
+  const p = await open(t, [2, 1]); p.send('tab'); assert.equal(p.debug().actionMode, true); p.send('backTab'); assert.equal(p.debug().actionMode, false);
+  assert.deepEqual(json(p, 'model-pick-favorites.json'), []); p.noEffects(); p.send('\x1b1'); assert.deepEqual(json(p, 'model-pick-favorites.json'), ['p00/model-0-0']);
+  p.send('\x1b1'); assert.deepEqual(json(p, 'model-pick-favorites.json'), []); p.noEffects(['model-pick-favorites.json']);
+});
+test('legacy provider AltUp/Down from model focus reorder providers without changing target', async t => {
+  const p = await open(t, [2, 1, 1]); p.send('\x1b[1;3B'); assert.equal(p.selectedLabel(), 'model-0-0');
+  assert.deepEqual(json(p, 'model-pick-order.json').providers, ['p01', 'p00', 'p02']); p.send('\x1b[1;3A');
+  assert.deepEqual(json(p, 'model-pick-order.json').providers, ['p00', 'p01', 'p02']); p.noEffects(['model-pick-order.json']);
+});
+test('search disables order writes rather than persisting a filtered subset', async t => {
+  const p = await open(t, [3, 2]); p.type('model');
+  for (const k of ['\x1b[1;3B', '\x1b[1;3C', '\x1b5', '\x1b6']) p.send(k);
+  assert.deepEqual(json(p, 'model-pick-order.json'), {}); p.noEffects();
+});
+test('custom order outranks default, favorite, usage, then stable config order', async t => {
+  const p = await open(t, [6], 0, { fixtureFiles: {
+    'settings.json': { defaultProvider: 'p00', defaultModel: 'model-0-1' },
+    'model-pick-order.json': { models: { p00: ['model-0-4'] }, futureOrder: true },
+    'model-pick-favorites.json': ['p00/model-0-2'],
+    'sessions/synthetic/synthetic.jsonl': [0, 1, 2].map(() => JSON.stringify({ message: { role: 'assistant', provider: 'p00', model: 'model-0-3' }, timestamp: '2026-01-01T00:00:00Z' })).join('\n'),
+  } });
+  assert.deepEqual(Array.from(p.debug().matrixCells, c => c.mid), ['model-0-4', 'model-0-1', 'model-0-2', 'model-0-3', 'model-0-0', 'model-0-5']);
+  p.send('\x1b[1;3C'); assert.equal(json(p, 'model-pick-order.json').futureOrder, true); p.noEffects(['model-pick-order.json']);
+});
+test('setting default preserves unknown settings and backs up without switching current', async t => {
+  const p = await open(t, [2], 0, { fixtureFiles: { 'settings.json': { future: { keep: true } } } });
+  p.send('right'); p.action('default'); assert.deepEqual(json(p, 'settings.json'), { future: { keep: true }, defaultProvider: 'p00', defaultModel: 'model-0-1' });
+  assert.ok(fs.existsSync(path.join(p.root, 'settings.json.bak-model-pick.sealed'))); assert.equal(p.current().id, 'model-0-0'); p.noEffects(['settings.json', 'settings.json.bak-model-pick.sealed']);
+});
+test('configured unavailable models remain visible but cannot switch or become default', async t => {
+  const p = await open(t, [2], 0, { available: m => m.id !== 'model-0-1' }); p.send('right');
+  assert.equal(p.selectedLabel(), 'model-0-1'); assert.match(p.screen(), /未就绪/); p.send('enter'); p.send('\x1bd'); await p.flush();
+  assert.deepEqual(json(p, 'settings.json'), {}); p.noEffects();
+});
+test('six palettes use real theme style and persist without data mutation', async t => {
+  const p = await open(t, [1]); const keys = new Set(); const screens = new Set();
+  for (let i = 0; i < 6; i++) { p.send('\x1bt'); keys.add(json(p, 'model-pick-theme.json').theme); screens.add(p.raw()); }
+  assert.equal(keys.size, 6); assert.equal(screens.size, 6); p.noEffects(['model-pick-theme.json']);
+});
+test('manage/providers commands focus real visible actions with distinct templates', async t => {
+  for (const args of ['manage', 'providers']) {
+    const p = await open(t, [2], 0, { args }); assert.equal(p.debug().actionMode, true);
+    assert.match(p.screen(), args === 'manage' ? /收藏 \[1\]/ : /编辑连接 \[2\]/); p.send('esc');
+    assert.equal(p.focus(), args === 'manage' ? 'model' : 'provider'); p.noEffects();
+  }
+});
+test('unknown SDK storage is readonly and performs zero filesystem reads, including default HOME', async t => {
+  const p = await open(t, [2], 0, { registryRuntime: null });
+  assert.deepEqual(p.reads, []); assert.match(p.screen(), /未读取默认 profile/);
+  for (const k of ['\x1b1', '\x1bd', '\x1bn', '\x1bx', '\x1bt']) p.send(k);
+  assert.deepEqual(p.reads, []); p.action('edit-model'); assert.equal(p.debug().view, 'info'); assert.match(p.readContent(), /model-0-0/);
+  assert.deepEqual(p.reads, []); p.send('cancel'); p.noEffects();
+});
+test('real fuzzy search includes Chinese provider display labels and noncontiguous model names', async t => {
+  const config = { providers: { p00: { name: '星河云', api: 'openai-completions', baseUrl: 'https://example.test/v1', models: [{ id: 'alpha-one', name: 'A long phoenix model' }] }, empty: { name: '空供应商', api: 'openai-completions', baseUrl: 'https://empty.test/v1', models: [] } } };
+  const p = await harness(t, { config }); p.type('星河'); assert.deepEqual([...new Set(p.debug().matrixCells.map(c => c.pid))], ['p00']);
+  p.replace('Alphx'); assert.equal(p.debug().matrixCells[0]?.mid, 'alpha-one');
+  p.replace('空供应商'); assert.match(p.screen(), /添加模型/); assert.doesNotMatch(p.screen(), /没有匹配/); assert.equal(p.calls.length, 0);
 });
 
-test('provider focus preserves circular row navigation and scrolls its target into view', async () => {
-  const p = await open(Array(23).fill(1));
-  p.send('left'); p.send('left'); p.send('up');
-  assert.equal(p.focus(), 'provider'); assert.equal(p.provider(), 'p22');
-  assert.match(p.detail(), /p22/);
-  p.send('down'); assert.equal(p.provider(), 'p00');
-  p.send('right'); assert.equal(p.focus(), 'model');
-  assert.match(p.detail(), /model-0-0/);
-  await p.close();
+test('Ctrl+C ends a remove-confirm task without any file or model effect', async t => {
+  const p = await open(t, [2, 1]); p.send('down'); p.send('\x1bx'); assert.equal(p.debug().view, 'confirm');
+  p.unsafeSend('cancel'); assert.equal(p.debug().view, 'matrix'); p.noEffects();
 });
-
-test('same add/remove keys dispatch model versus provider intents from visible focus', async () => {
-  const p = await open([2, 1], 0, { recordActions: true });
-  p.send('\x1bn'); p.send('\x1bx');
-  assert.deepEqual(p.actionCalls.map((c) => [c.intent, c.target.kind, c.target.provider, c.target.modelId]), [
-    ['add', 'model', 'p00', 'model-0-0'], ['remove', 'model', 'p00', 'model-0-0'],
-  ]);
-  p.send('left'); p.send('left'); p.send('down');
-  p.send('\x1bn'); p.send('\x1bx');
-  assert.deepEqual(p.actionCalls.slice(2).map((c) => [c.intent, c.target.kind, c.target.provider, c.target.modelId]), [
-    ['add', 'provider', 'p01', undefined], ['remove', 'provider', 'p01', undefined],
-  ]);
-  p.send('\x1b\x01'); p.send('\x1b\x18');
-  assert.equal(p.actionCalls.length, 4, 'no Ctrl+Alt category-specific actions');
-  assert.equal(p.mutations.length, 0);
-  await p.close();
+test('unpainted selected target cannot switch; fresh paint authorizes only that target', async t => {
+  const p = await open(t, [2]); p.unsafeSend('right'); p.unsafeSend('enter'); await p.flush();
+  assert.equal(p.selections.length, 0); assert.equal(p.debug().view, 'matrix');
+  assert.equal(p.selectedLabel(), 'model-0-1'); p.send('enter'); await p.finished;
+  assert.deepEqual(p.selections.map(m => m.id), ['model-0-1']); assert.equal(p.calls.length, 0);
 });
-
-test('an actually empty registry starts in provider focus and permits add without a current row', async () => {
-  const p = await open([], 0, { recordActions: true });
-  assert.equal(p.focus(), 'provider');
-  assert.match(p.lines().join('\n'), /暂无.*供应商|添加供应商/);
-  p.send('\x1bn');
-  assert.equal(p.actionCalls.length, 1);
-  assert.equal(p.actionCalls[0].intent, 'add');
-  assert.equal(p.actionCalls[0].target.kind, 'provider');
-  assert.equal(p.actionCalls[0].target.provider, undefined);
-  p.send('\x1bx'); assert.equal(p.actionCalls.length, 1);
-  await p.close();
+test('switch revalidates availability after refresh instead of using a stale row object', async t => {
+  let ready = true;
+  const p = await open(t, [2], 0, { available: m => ready || m.id !== 'model-0-1', onRefresh(_options, count) { if (count > 1) ready = false; } });
+  p.send('right'); p.send('enter'); await p.flush(); assert.equal(p.selections.length, 0);
+  assert.match(p.screen(), /未切换/); p.noEffects();
 });
-
-test('zero search matches never masquerade as no configured providers', async () => {
-  const p = await open([1, 1], 0, { recordActions: true });
-  for (const c of 'zzzzzzzzzz') p.send(c);
-  p.send('left'); p.send('left'); p.send('enter');
-  assert.equal(p.focus(), 'model');
-  assert.equal(p.actionCalls.length, 0);
-  assert.match(p.lines().join('\n'), /无匹配模型/);
-  await p.close();
+test('split, memory, accessor and proxy SDK storage never read a fallback profile', async t => {
+  for (const runtime of [
+    { modelsPath: '/unknown/models.json', credentials: { store: { authPath: '/elsewhere/auth.json' } } },
+    { modelsPath: undefined, credentials: { store: {} } },
+    Object.defineProperty({}, 'modelsPath', { get() { assert.fail('storage adapter invoked SDK getter'); } }),
+    new Proxy({}, { get() { assert.fail('storage adapter dereferenced proxy'); } }),
+  ]) {
+    const p = await open(t, [1], 0, { registryRuntime: runtime });
+    assert.deepEqual(p.reads, []); assert.match(p.screen(), /未读取默认 profile/); p.send('\x1b1'); assert.deepEqual(p.reads, []); p.noEffects();
+  }
 });
-
-test('empty providers retain a model-area add placeholder and never acquire column minus one', async () => {
-  const p = await open([0], 0, { recordActions: true });
-  assert.equal(p.provider(), 'p00'); assert.equal(p.focus(), 'model');
-  assert.match(p.lines().join('\n'), /添加模型/);
-  p.send('right'); p.send('enter');
-  assert.equal(p.actionCalls[0].intent, 'add');
-  assert.equal(p.actionCalls[0].target.provider, 'p00');
-  assert.equal(p.actionCalls[0].target.kind, 'model');
-  p.send('left'); p.send('left'); assert.equal(p.focus(), 'provider');
-  p.send('right'); p.send('\x1bn');
-  assert.equal(p.actionCalls.at(-1).target.kind, 'model');
-  await p.close();
+test('explicit nondefault profile owns all picker state, usage and palette paths', async t => {
+  // harness constructs this exact profile within its fresh fixture HOME.
+  const p = await open(t, [1], 0, { logicalHome: '/home/synthetic-host-profile', profileRelativePath: 'embedded/profile' });
+  p.send('\x1b1'); p.send('\x1bt');
+  assert.ok(p.reads.every(([_method, file]) => file === '/' || '/home/synthetic-host-profile/embedded/profile'.startsWith(file + '/') || file.startsWith('/home/synthetic-host-profile/embedded/profile')));
+  p.noEffects(['model-pick-favorites.json', 'model-pick-theme.json']);
 });
-
-test('provider focus cannot favorite, default, or reorder an invisible model', async () => {
-  const p = await open([2, 1]);
-  p.send('left'); p.send('left');
-  for (const k of ['\t', '\x1bd', '\x1b[1;3C', '\x1b[1;3D']) p.send(k);
-  assert.equal(p.focus(), 'provider');
-  assert.equal(p.mutations.length, 0);
-  assert.equal(p.selected.length, 0);
-  await p.close();
+test('matrix render, resize, query and selection perform no filesystem, crypto or registry refresh work', async t => {
+  const p = await open(t, [4, 3]);
+  const counts = () => ({ reads: p.reads.length, opens: p.protection.state.opens.length, catalog: p.catalogCalls(), refresh: p.refreshes.length });
+  const before = counts();
+  for (const width of [32, 80, 120, 180]) p.lines(width);
+  p.type('p0'); p.send('down'); p.send('right'); p.lines();
+  assert.deepEqual(counts(), before); p.noEffects();
 });
-
-test('Enter on a provider opens its actions instead of switching its hidden first model', async () => {
-  const p = await open([1], 0, { recordActions: true });
-  p.send('left'); p.send('left'); p.send('enter');
-  assert.equal(p.selected.length, 0);
-  assert.equal(p.actionCalls.length, 1);
-  assert.equal(p.actionCalls[0].target.kind, 'provider');
-  assert.equal(p.actionCalls[0].intent, undefined);
-  await p.close();
+test('usage count and then recency outrank stable config order within an uncustomized provider', async t => {
+  const message = (model, timestamp) => JSON.stringify({ type: 'message', timestamp, message: { role: 'assistant', provider: 'p00', model } });
+  const p = await open(t, [5], 0, { fixtureFiles: { 'sessions/fixture/2026.jsonl': [
+    message('model-0-2', '2026-01-01T00:00:00Z'), message('model-0-2', '2026-01-02T00:00:00Z'),
+    message('model-0-3', '2026-01-03T00:00:00Z'), message('model-0-4', '2026-01-04T00:00:00Z'),
+  ].join('\n') } });
+  assert.deepEqual(Array.from(p.debug().matrixCells, c => c.mid), ['model-0-2', 'model-0-4', 'model-0-3', 'model-0-0', 'model-0-1']); p.noEffects();
 });
-
-test('small terminals retain the focused row and footer without clipping operations offscreen', async () => {
-  const p = await open(Array(23).fill(1), 0, { terminalRows: 16 });
-  p.send('up');
-  assert.equal(p.provider(), 'p22');
-  assert.ok(p.lines().length <= 16);
-  for (const width of [32, 60, 80, 180]) assert.ok(p.raw(width).every((line) => tui.visibleWidth(line) < width));
-  await p.close();
+test('custom provider order keeps current identity and is not overwritten by search or display ordering', async t => {
+  const p = await open(t, [2, 1, 1], 0, { fixtureFiles: { 'model-pick-order.json': { providers: ['p02', 'p00', 'p01'], models: { p00: ['model-0-1', 'model-0-0'] }, future: { keep: true } } } });
+  assert.deepEqual([...new Set(Array.from(p.debug().matrixCells, c => c.pid))], ['p02', 'p00', 'p01']); assert.equal(p.selectedLabel(), 'model-0-0');
+  p.type('p00'); p.send('right'); assert.equal(p.current().id, 'model-0-0'); p.noEffects();
+});
+test('malformed default, favorites and order files fail closed without repair or fallback writes', async t => {
+  for (const [file, key] of [['settings.json', '\x1bd'], ['model-pick-favorites.json', '\x1b1'], ['model-pick-order.json', '\x1b[1;3C']]) {
+    const p = await open(t, [2], 0, { fixtureFiles: { [file]: '{SYNTHETIC-invalid' } });
+    p.send('right'); p.send(key); p.noEffects();
+  }
+});
+test('busy host blocks switching, favorite/default/order/add/remove while retaining view/navigation', async t => {
+  const p = await open(t, [2, 1], 0, { idle: () => false }); p.send('right');
+  for (const key of ['enter', '\x1b1', '\x1bd', '\x1b[1;3D', '\x1bn', '\x1bx']) p.send(key);
+  await p.flush(); assert.equal(p.debug().view, 'matrix'); assert.equal(p.selectedLabel(), 'model-0-1'); p.noEffects();
 });

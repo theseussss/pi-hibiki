@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { fileURLToPath } = require('node:url');
 const { syncBuiltinESMExports } = require('node:module');
-const roots = [process.env.HIBIKI_PACKAGE_ROOT, process.env.HIBIKI_PI_ROOT,
+const roots = [process.env.HIBIKI_PACKAGE_ROOT, process.env.MODEL_PICK_PRODUCTION_ROOT, process.env.HIBIKI_PI_ROOT,
   process.env.HIBIKI_TYPESCRIPT_ROOT, path.resolve(path.dirname(process.execPath), '..')].filter(Boolean).map(p => path.resolve(p));
 const native = '/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe';
 const inside = (p, r) => p === r || p.startsWith(r + path.sep);

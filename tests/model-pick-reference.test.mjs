@@ -432,6 +432,34 @@ test('getters/prototype values and sparse arrays cannot smuggle field values or 
   assert.equal(resolve(base({ tests })).provenance.reasoning.source, 'default');
 });
 
+test('thinking maps resolve with provenance, preserve null and defaults, and compare canonical entries', () => {
+  const map = { max: 'max', minimal: null, xhigh: 'xhigh' };
+  const result = resolve(base({ manual: { reasoning: true, thinkingLevelMap: map }, providerModel: { thinkingLevelMap: { max: 'other' } } }));
+  assert.deepEqual(result.fields.thinkingLevelMap, { minimal: null, xhigh: 'xhigh', max: 'max' });
+  assert.equal(result.provenance.thinkingLevelMap.source, 'manual');
+  const absent = resolve(base({ manual: { reasoning: true } }));
+  assert.equal(absent.fields.thinkingLevelMap, undefined);
+  assert.ok(absent.needsReview.includes('thinkingLevelMap'));
+  const rows = [{ provider: 'a', id: 'model', thinkingLevelMap: map }, { provider: 'b', id: 'model', thinkingLevelMap: { xhigh: 'xhigh', minimal: null, max: 'max' } }];
+  assert.deepEqual(template('model', rows).thinkingLevelMap, { minimal: null, xhigh: 'xhigh', max: 'max' });
+  assert.ok(resolve(base({ generic: template('model', rows) })).needsReview.includes('thinkingLevelMap'));
+  rows[1].thinkingLevelMap.max = 'different';
+  assert.equal(template('model', rows), undefined);
+  const selected = api.resolveModelFields(base({ manual: { thinkingLevelMap: map } }));
+  selected.fields.thinkingLevelMap.max = 'changed';
+  assert.equal(map.max, 'max');
+});
+
+test('thinking maps reject unknown keys, accessors and malformed entries without invoking getters', () => {
+  const getter = {}; Object.defineProperty(getter, 'max', { enumerable: true, get: forbidden });
+  for (const map of [null, [], { max: 3 }, { max: undefined }, { invalid: 'value' }, getter, { max: 'x\ninvalid' }, { max: 'x'.repeat(129) }]) {
+    const result = resolve(base({ manual: { thinkingLevelMap: map }, providerModel: { thinkingLevelMap: { max: 'max' } } }));
+    assert.deepEqual(result.fields.thinkingLevelMap, { max: 'max' });
+    hasReason(result, 'thinkingLevelMap', 'manual', 'invalid-value');
+  }
+  assert.deepEqual(resolve(base({ manual: { thinkingLevelMap: {} } })).fields.thinkingLevelMap, {});
+});
+
 test('frozen inputs stay unchanged; selected modality arrays and histories are detached', () => {
   const manual = freezeDeep(allFields());
   const tests = freezeDeep([record({ reasoning: false }), record({ name: 'Newer' }, { testedAt: NOW - 10 })]);

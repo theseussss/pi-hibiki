@@ -1,14 +1,19 @@
 /**
  * Pure, in-memory model reference resolution. No I/O, clock, configuration, or
  * registry access. Unknown properties (including channel/secrets) never leave
- * these functions; only the five explicitly supported model fields are copied.
+ * these functions; only explicitly supported model fields are copied.
  */
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+export type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
+
 export type ModelFields = {
   name?: string;
   contextWindow?: number;
   maxTokens?: number;
   reasoning?: boolean;
   input?: ('text' | 'image')[];
+  thinkingLevelMap?: ThinkingLevelMap;
   [key: string]: unknown;
 };
 
@@ -51,7 +56,7 @@ export type FieldProvenance = {
   history: { source: string; reason: string }[];
 };
 
-const FIELD_NAMES = ['name', 'contextWindow', 'maxTokens', 'reasoning', 'input'] as const;
+const FIELD_NAMES = ['name', 'contextWindow', 'maxTokens', 'reasoning', 'input', 'thinkingLevelMap'] as const;
 type Field = (typeof FIELD_NAMES)[number];
 const SCOPE_KEYS = ['provider', 'modelId', 'endpoint', 'api', 'credentialVersion'] as const;
 const MISSING = Symbol('missing');
@@ -88,12 +93,31 @@ function dataArray(value: unknown): unknown[] | undefined {
   return result;
 }
 
+/** Copy only known, own data properties. Empty maps and null entries are meaningful. */
+export function copyThinkingLevelMap(value: unknown): ThinkingLevelMap | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string' || !THINKING_LEVELS.includes(key as ThinkingLevel))) return undefined;
+  const result: ThinkingLevelMap = {};
+  for (const level of THINKING_LEVELS) {
+    if (!keys.includes(level)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(value, level);
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return undefined;
+    const entry: unknown = descriptor.value;
+    if (entry !== null && (typeof entry !== 'string' || entry.length > 128 ||
+        /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(entry))) return undefined;
+    result[level] = entry as string | null;
+  }
+  return result;
+}
+
 function valid(field: Field, value: unknown): boolean {
   switch (field) {
     case 'name': return typeof value === 'string' && value.trim().length > 0;
     case 'contextWindow':
     case 'maxTokens': return positiveInteger(value);
     case 'reasoning': return typeof value === 'boolean';
+    case 'thinkingLevelMap': return copyThinkingLevelMap(value) !== undefined;
     case 'input': {
       const items = dataArray(value);
       return items !== undefined && items.length > 0
@@ -103,6 +127,7 @@ function valid(field: Field, value: unknown): boolean {
 }
 
 function copyValue(field: Field, value: unknown): unknown {
+  if (field === 'thinkingLevelMap') return copyThinkingLevelMap(value)!;
   if (field !== 'input') return value;
   // Input modalities form a set. Canonical ordering also makes consensus stable.
   const modalities = dataArray(value)!;
@@ -240,16 +265,21 @@ export function resolveModelFields({ scope, now, tests, manual, providerModel, g
         case 'maxTokens': value = Math.min(8192, fields.contextWindow!); break;
         case 'reasoning': value = false; break;
         case 'input': value = ['text']; break;
+        // Absence is Pi's default, not an assertion that any extended level works.
+        case 'thinkingLevelMap': value = undefined; break;
       }
-      fields[field] = value as never;
+      if (value !== undefined) fields[field] = value as never;
       chosen = 'default';
-      if (field !== 'name') review.add(field);
+      if (field !== 'name' && (field !== 'thinkingLevelMap' || fields.reasoning)) review.add(field);
       history.push({
         source: 'default',
-        reason: field === 'name' ? 'model-id-label' : field === 'maxTokens' && fields.contextWindow! < 8192
-          ? 'unconfirmed-default-clamped-to-context' : 'unconfirmed-conservative-default',
+        reason: field === 'name' ? 'model-id-label' : field === 'thinkingLevelMap' ? 'pi-default-unconfirmed'
+          : field === 'maxTokens' && fields.contextWindow! < 8192
+            ? 'unconfirmed-default-clamped-to-context' : 'unconfirmed-conservative-default',
       });
     }
+    // A different channel's wire values are a suggestion, not proof for this endpoint.
+    if (field === 'thinkingLevelMap' && chosen === 'generic') review.add(field);
     provenance[field] = { source: chosen, history };
   }
 
@@ -268,6 +298,7 @@ function pickTemplate(row: unknown): ModelFields {
 }
 
 function sameValue(field: Field, a: unknown, b: unknown): boolean {
+  if (field === 'thinkingLevelMap') return JSON.stringify(a) === JSON.stringify(b);
   return field === 'input'
     ? (a as string[]).join(',') === (b as string[]).join(',') : a === b;
 }

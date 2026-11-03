@@ -43,6 +43,7 @@ function load(fsImpl) {
       if (id === 'node:fs') return fsImpl;
       if (['node:path', 'node:crypto', 'node:util'].includes(id)) return require(id);
       if (id === './vault.js') return source('vault.ts');
+      if (id === './reference.js') return source('reference.ts');
       throw new Error('Unexpected batch-store dependency; network/config access forbidden.');
     };
     vm.runInThisContext(`(function(exports,require,module){\n${compiled.get(filename)}\n})`, { filename })(module.exports, localRequire, module);

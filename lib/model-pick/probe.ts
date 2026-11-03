@@ -16,6 +16,8 @@ export interface ProbeOptions {
 	timeoutMs?: number;
 	fetcher?: typeof fetch;
 	checkDeadline?: () => void;
+	/** Internal fixed probe only; enables bounded SSE parsing instead of JSON. */
+	eventStream?: boolean;
 }
 const APIS = new Set(["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"]);
 const SENTINEL = "MODEL_PICK_OK";
@@ -97,9 +99,11 @@ function safeHeaders(headers: Record<string, string> = {}): Record<string, strin
 		return out;
 	} catch { throw new ProbeError("protocol"); }
 }
-async function jsonBounded(response: Response): Promise<any> {
+async function jsonBounded(response: Response, signal: AbortSignal): Promise<any> {
 	if (!response.body) throw new ProbeError("protocol");
 	const reader = response.body.getReader();
+	const onAbort = () => { void reader.cancel().catch(() => {}); };
+	if (signal.aborted) onAbort(); else signal.addEventListener("abort", onAbort, { once: true });
 	const chunks: Uint8Array[] = [];
 	let length = 0;
 	try {
@@ -115,9 +119,48 @@ async function jsonBounded(response: Response): Promise<any> {
 		for (const c of chunks) { data.set(c, at); at += c.length; }
 		try { return JSON.parse(new TextDecoder().decode(data)); }
 		catch { throw new ProbeError("protocol"); }
-	} finally { reader.releaseLock(); }
+	} catch (error) { void reader.cancel().catch(() => {}); throw error; }
+	finally { signal.removeEventListener("abort", onAbort); reader.releaseLock(); }
 }
-async function request(scope: Scope, suffix: string, method: string, body: unknown, options: ProbeOptions): Promise<any> {
+async function streamBounded(response: Response, api: string, signal: AbortSignal): Promise<{ text: string; completed: boolean }> {
+	if (!response.body || !response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) throw new ProbeError("protocol");
+	const reader = response.body.getReader(); const decoder = new TextDecoder();
+	const onAbort = () => { void reader.cancel().catch(() => {}); };
+	if (signal.aborted) onAbort(); else signal.addEventListener("abort", onAbort, { once: true });
+	let buffer = ""; let bytes = 0; let text = ""; let completed = false; let frame = "";
+	const consume = (line: string) => {
+		if (line.startsWith("data:")) frame += `${line.slice(5).trimStart()}\n`;
+		else if (line === "" && frame) {
+			const payload = frame.trimEnd(); frame = "";
+			if (payload === "[DONE]") return;
+			let value: any; try { value = JSON.parse(payload); } catch { throw new ProbeError("protocol"); }
+			if (api === "openai-completions") {
+				const choice = value?.choices?.[0];
+				if (typeof choice?.delta?.content === "string") text += choice.delta.content;
+				if (typeof choice?.finish_reason === "string") completed = true;
+			} else {
+				if (value?.type === "response.output_text.delta" && typeof value.delta === "string") text += value.delta;
+				if (value?.type === "response.completed") completed = true;
+			}
+			if (text.length > 8192) throw new ProbeError("protocol");
+		}
+	};
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			bytes += value.byteLength;
+			if (bytes > MAX_RESPONSE) { void reader.cancel().catch(() => {}); throw new ProbeError("protocol"); }
+			buffer += decoder.decode(value, { stream: true });
+			let at: number;
+			while ((at = buffer.indexOf("\n")) >= 0) { const line = buffer.slice(0, at).replace(/\r$/, ""); buffer = buffer.slice(at + 1); consume(line); }
+		}
+		buffer += decoder.decode(); if (buffer) consume(buffer.replace(/\r$/, "")); consume("");
+		return { text, completed };
+	} catch (error) { void reader.cancel().catch(() => {}); throw error; }
+	finally { signal.removeEventListener("abort", onAbort); reader.releaseLock(); }
+}
+export async function probeRequest(scope: Scope, suffix: string, method: string, body: unknown, options: ProbeOptions): Promise<any> {
 	validateScope(scope);
 	if (options.signal?.aborted) throw new ProbeError("cancelled");
 	const timeout = options.timeoutMs ?? 10000;
@@ -143,14 +186,14 @@ async function request(scope: Scope, suffix: string, method: string, body: unkno
 			void response.body?.cancel().catch(() => {});
 			throw new ProbeError(response.status === 401 || response.status === 403 ? "auth" : response.status === 429 ? "limited" : response.status >= 500 ? "server" : "protocol");
 		}
-		return jsonBounded(response);
+		return options.eventStream ? streamBounded(response, scope.api, abort.signal) : jsonBounded(response, abort.signal);
 	})();
 	try { return await Promise.race([task, cancelled]); }
 	catch (error) { throw error instanceof ProbeError ? error : new ProbeError(options.signal?.aborted ? "cancelled" : "network"); }
 	finally { clearTimeout(timer); options.signal?.removeEventListener("abort", onCancel); }
 }
 export async function discoverModels(scope: Scope, options: ProbeOptions = {}): Promise<string[]> {
-	const data = await request(scope, "models", "GET", undefined, options);
+	const data = await probeRequest(scope, "models", "GET", undefined, options);
 	const list = scope.api === "google-generative-ai" ? data?.models : data?.data;
 	if (!Array.isArray(list)) throw new ProbeError("protocol");
 	// Only model IDs enter the UI. Never preserve response bodies or server messages.
@@ -185,7 +228,7 @@ export async function probeText(scope: Scope, options: ProbeOptions = {}): Promi
 	}
 	let code: ProbeCode = "ok";
 	try {
-		const data = await request(scope, suffix, "POST", body, options);
+		const data = await probeRequest(scope, suffix, "POST", body, options);
 		let text: unknown;
 		if (scope.api === "openai-completions") text = data?.choices?.[0]?.message?.content;
 		else if (scope.api === "openai-responses") text = data?.output?.flatMap((o: any) => o?.content ?? []).filter((c: any) => c?.type === "output_text").map((c: any) => c.text).join("");

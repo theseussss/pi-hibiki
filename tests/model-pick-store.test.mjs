@@ -40,6 +40,7 @@ function load(fsImpl) {
       if (id === 'node:fs') return fsImpl;
       if (id === 'node:path' || id === 'node:crypto' || id === 'node:util') return require(id);
       if (id === './vault.js') return source('vault.ts');
+      if (id === './reference.js') return source('reference.ts');
       throw new Error('Unexpected store dependency.');
     };
     vm.runInThisContext(`(function(exports,require,module,__filename,__dirname){\n${output}\n})`, { filename })(
@@ -133,6 +134,54 @@ function interrupted(f, target) {
   assert.ok(hit); assert.equal(f.store.hasPending(), true);
   return f.stateOfVault().pending;
 }
+
+test('only an explicit reviewed map-reset edit removes the map and preserves every unknown model field',t=>{
+  const original=seeded();original.providers.custom.models[0].thinkingLevelMap={xhigh:'xhigh',max:'max'};
+  const f=fixture(t,original);f.unlock();
+  f.store.putModel('custom',{...M,name:'Keep mapping'},'edit',f.revision());
+  assert.deepEqual(f.config().providers.custom.models[0].thinkingLevelMap,{xhigh:'xhigh',max:'max'});
+  f.store.putModel('custom',{...M,name:'Pi defaults'},'edit',f.revision(),undefined,{unsetThinkingLevelMap:true});
+  const saved=f.config().providers.custom.models[0];assert.equal(Object.hasOwn(saved,'thinkingLevelMap'),false);
+  assert.deepEqual(saved.compat,original.providers.custom.models[0].compat);assert.deepEqual(saved.cost,original.providers.custom.models[0].cost);
+  assert.equal(saved.vendorSecret,SECRET);assert.deepEqual(f.config().providers.other,original.providers.other);
+  f.store.putModel('custom',{...M,thinkingLevelMap:{}},'edit',f.revision());
+  assert.deepEqual(f.config().providers.custom.models[0].thinkingLevelMap,{},'explicit empty remains distinct from absent');
+});
+
+test('contradictory or malformed reset intent refuses without applying any model change',t=>{
+  const f=fixture(t,seeded());f.unlock();const before=fs.readFileSync(f.modelFile,'utf8');
+  for(const intent of [{unsetThinkingLevelMap:'yes'},{unsetThinkingLevelMap:true,unknown:true},{}]){
+    code(()=>f.store.putModel('custom',M,'edit',f.revision(),undefined,intent),'INVALID_INPUT');
+    assert.equal(fs.readFileSync(f.modelFile,'utf8'),before);
+  }
+  code(()=>f.store.putModel('custom',{...M,thinkingLevelMap:{}},'edit',f.revision(),undefined,{unsetThinkingLevelMap:true}),'INVALID_INPUT');
+  code(()=>f.store.putModel('custom',{...M,id:'new'},'add',f.revision(),undefined,{unsetThinkingLevelMap:true}),'INVALID_INPUT');
+  assert.equal(fs.readFileSync(f.modelFile,'utf8'),before);
+});
+
+test('thinking map is preserved, edited, reset and rejected atomically for malformed values', t => {
+  const original = seeded(); original.providers.custom.models[0].thinkingLevelMap = { minimal: null, xhigh: 'xhigh', max: 'max' };
+  const f = fixture(t, original); f.unlock();
+  assert.deepEqual(f.store.snapshot().providers[0].models[0].thinkingLevelMap, { minimal: null, xhigh: 'xhigh', max: 'max' });
+  f.store.putModel('custom', { ...M, name: 'unchanged-map' }, 'edit', f.revision());
+  assert.deepEqual(f.config().providers.custom.models[0].thinkingLevelMap, original.providers.custom.models[0].thinkingLevelMap);
+  f.store.putModel('custom', { ...M, thinkingLevelMap: {} }, 'edit', f.revision());
+  assert.deepEqual(f.config().providers.custom.models[0].thinkingLevelMap, {});
+  f.store.putModels('custom', [{ ...M, id: 'new', thinkingLevelMap: { off: null, max: 'vendor_max' } }], f.revision());
+  assert.deepEqual(f.config().providers.custom.models[1].thinkingLevelMap, { off: null, max: 'vendor_max' });
+  for (const invalid of [{ max: 5 }, { bogus: 'yes' }, null, [], { max: '\n' }]) {
+    const before = fs.readFileSync(f.modelFile, 'utf8');
+    code(() => f.store.putModel('custom', { ...M, thinkingLevelMap: invalid }, 'edit', f.revision()), 'INVALID_INPUT');
+    assert.equal(fs.readFileSync(f.modelFile, 'utf8'), before);
+  }
+});
+
+test('snapshot marks malformed existing map without leaking raw values', t => {
+  const config = seeded(); config.providers.custom.models[0].thinkingLevelMap = { max: SECRET, unexpected: SECRET };
+  const f = fixture(t, config); const row = f.store.snapshot().providers[0].models[0];
+  assert.equal(row.invalidThinkingLevelMap, true); assert.equal(row.thinkingLevelMap, undefined);
+  assert.ok(!JSON.stringify(row).includes(SECRET));
+});
 
 test('empty snapshots, locked inspection, and unlocking never create files', t => {
   const f = fixture(t);
@@ -427,6 +476,23 @@ test('fault completing vault after models rename recovers from exact after hash 
   restarted.unlock(PASS); restarted.recover(revision);
   assert.equal(f.calls.slice(at).filter(e => e.op === 'renameSync' && e.args[1] === f.modelFile).length, 0);
   assert.equal(f.store.hasPending(), false); assert.equal(f.store.listArchives().length, 1);
+});
+
+test('recovery is bound to the confirmed journal even when models revision stays unchanged', t => {
+  const f = fixture(t, seeded()); f.unlock();
+  let vaultWrites = 0;
+  f.state.fault = e => { if (e.op === 'renameSync' && e.args[1] === f.vaultFile && ++vaultWrites === 2) throw new Error(SECRET); };
+  code(() => f.store.editProvider('custom', { name: 'A' }, f.revision()), 'IO_ERROR'); f.state.fault = undefined;
+  const confirmed = f.store.pendingDetails(); const sameRevision = f.revision();
+  f.store.recover(sameRevision, undefined, confirmed.id);
+  let hit = false;
+  f.state.fault = e => { if (!hit && e.op === 'renameSync' && e.args[1] === f.modelFile) { hit = true; throw new Error(SECRET); } };
+  code(() => f.store.editProvider('custom', { name: 'B' }, f.revision()), 'IO_ERROR'); f.state.fault = undefined;
+  assert.equal(f.revision(), sameRevision); assert.notEqual(f.store.pendingDetails().id, confirmed.id);
+  const before = fs.readFileSync(f.modelFile, 'utf8'); const vault = fs.readFileSync(f.vaultFile, 'utf8');
+  code(() => f.store.recover(sameRevision, undefined, confirmed.id), 'CONFLICT');
+  assert.equal(fs.readFileSync(f.modelFile, 'utf8'), before); assert.equal(fs.readFileSync(f.vaultFile, 'utf8'), vault);
+  f.store.recover(sameRevision, undefined, f.store.pendingDetails().id); assert.equal(f.config().providers.custom.name, 'B');
 });
 
 test('fault after durable models rename but before index completion retains pending and materials', t => {

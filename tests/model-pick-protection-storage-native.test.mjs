@@ -41,7 +41,7 @@ test('native DPAPI composes with automatic transactions, records, restore and se
     const ts = require(typescriptPath());
     const cache = new Map();
     function load(name) {
-      if (!['store', 'records', 'protection', 'vault'].includes(name)) throw new Error();
+      if (!['store', 'records', 'protection', 'vault', 'reference'].includes(name)) throw new Error();
       if (cache.has(name)) return cache.get(name).exports;
       const filename = fileURLToPath(new URL(`../lib/model-pick/${name}.ts`, import.meta.url));
       const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { fileName: filename,
@@ -80,6 +80,11 @@ test('native DPAPI composes with automatic transactions, records, restore and se
     assert.equal(fs.statSync(data).mode & 0o777, 0o700);
     protection.clear(); protection = make(); store = new PickerStore(root, [], protection); records = new PickerRecords(root, protection);
     assert.equal(records.tests().length, 1); assert.deepEqual(records.tests()[0].verifiedFields, []);
+    const binding = records.credentialVersion({ authorization: 'Bearer SYNTHETIC-DPAPI-BINDING' });
+    protection.clear(); protection = make(); records = new PickerRecords(root, protection);
+    assert.equal(records.credentialVersion({ authorization: 'Bearer SYNTHETIC-DPAPI-BINDING' }), binding);
+    assert.notEqual(records.credentialVersion({ authorization: 'Bearer SYNTHETIC-DPAPI-CHANGED' }), binding);
+    assert.equal(fs.readFileSync(path.join(data, 'records.auto.json'), 'utf8').includes('SYNTHETIC-DPAPI-BINDING'), false);
     store.restore(archive.id, store.snapshot().revision);
     const restored = JSON.parse(fs.readFileSync(path.join(root, 'models.json'), 'utf8'));
     assert.deepEqual(restored.preservedRoot, original.preservedRoot); assert.equal(restored.providers.custom.apiKey, secret);

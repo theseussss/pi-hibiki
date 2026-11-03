@@ -11,14 +11,15 @@ const source = fileURLToPath(new URL('../lib/config.ts', import.meta.url));
 const importer = fileURLToPath(new URL('../scripts/import-config.mjs', import.meta.url));
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'model-pick-hibiki-config-')); t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const api = loadTypeScript(source, { 'node:fs': fs, 'node:os': { homedir: () => home } });
+  const profile = path.join(home, 'explicit-sdk-profile');
+  const api = loadTypeScript(source, { 'node:fs': fs, '@earendil-works/pi-coding-agent': { getAgentDir: () => profile } });
   const from = path.join(home, 'gpt-fast-mode.json'), to = path.join(home, 'pi-hibiki.json');
-  return { home, api, from, to };
+  return { home, profile, api, from, to };
 }
 const enabled = (api, file) => api.readHibikiConfig(file).fast.enableUltrafast;
 
 test('config has an own path, missing reads never create files or load the donor flag', (t) => {
-  const f = fixture(t); assert.equal(f.api.getHibikiConfigPath(), path.join(f.home, '.pi/agent/pi-hibiki.json'));
+  const f = fixture(t); assert.equal(f.api.getHibikiConfigPath(), path.join(f.profile, 'pi-hibiki.json'));
   assert.equal(f.api.getHibikiConfigPath(f.home), f.to);
   fs.writeFileSync(f.from, '{"enableUltrafast":true}');
   assert.equal(enabled(f.api, f.to), false); assert.equal(fs.existsSync(f.to), false);

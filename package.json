@@ -1,6 +1,6 @@
 {
   "name": "pi-hibiki",
-  "version": "0.1.0",
+  "version": "0.1.8",
   "private": true,
   "description": "Hibiki · 模型工作台 — model selection, provider/model management and session Fast policy",
   "type": "module",

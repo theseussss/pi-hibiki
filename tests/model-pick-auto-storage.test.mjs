@@ -61,7 +61,7 @@ function protector() {
 function load(fsImpl) {
   const modules = new Map();
   function source(name) {
-    assert.ok(['store.ts', 'records.ts', 'vault.ts'].includes(name));
+    assert.ok(['store.ts', 'records.ts', 'vault.ts', 'reference.ts'].includes(name));
     if (modules.has(name)) return modules.get(name).exports;
     if (!compiled.has(name)) compiled.set(name, ts.transpileModule(fs.readFileSync(path.join(sourceDir, name), 'utf8'), {
       fileName: name, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -71,6 +71,7 @@ function load(fsImpl) {
       if (id === 'node:fs') return fsImpl;
       if (['node:path', 'node:crypto', 'node:util'].includes(id)) return require(id);
       if (id === './vault.js') return source('vault.ts');
+      if (id === './reference.js') return source('reference.ts');
       throw new Error('Unexpected runtime dependency; platform initialization forbidden.');
     };
     vm.runInThisContext(`(function(exports,require,module){\n${compiled.get(name)}\n})`, { filename: path.join(sourceDir, name) })(module.exports, localRequire, module);

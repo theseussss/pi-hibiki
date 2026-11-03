@@ -12,7 +12,8 @@ test('ordinary package registration is lazy: no profile, registry or protection 
   const forbidden = () => assert.fail('registration must not read user data or initialize helpers');
   const api = loadTypeScript(path.join(root, 'extensions/model-pick.ts'), {
     'node:fs': new Proxy({ constants: fs.constants }, { get(target, name) { return name in target ? target[name] : forbidden; } }),
-    'node:os': { homedir: () => '/home/synthetic-user-not-a-real-profile' }, '@earendil-works/pi-tui': tui,
+    'node:os': { homedir: forbidden }, '@earendil-works/pi-tui': tui,
+    '@earendil-works/pi-coding-agent': { getAgentDir: forbidden, getPackageDir: forbidden },
     '@earendil-works/pi-ai/providers/all': { getBuiltinProviders: forbidden },
     '../lib/model-pick/protection.js': { createRecordProtection: forbidden },
   }, { process: { pid: 1, env: {}, getuid: () => 1000 } });

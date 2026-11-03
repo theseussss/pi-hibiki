@@ -8,3 +8,6 @@ node_modules/
 /models.json
 /settings.json
 /.npmrc
+
+# Local working notes contain private conversation/acceptance history.
+/docs/EXPERIENCE-CONTRACT.md

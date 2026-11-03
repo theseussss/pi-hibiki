@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { types } from "node:util";
 import { openJson, sealJson } from "./vault.js";
 import type { TestRecord } from "./reference.js";
@@ -57,6 +57,11 @@ function eventValue(value: unknown): void {
 			!Object.values(r.scope).every(text) || !timestamp(r.testedAt) || !timestamp(r.expiresAt) || r.expiresAt <= r.testedAt ||
 			!object(r.fields) || !Array.isArray(r.verifiedFields) || !r.verifiedFields.every(text) ||
 			!["passed", "failed", "inconclusive"].includes(r.status as string)) invalid();
+	} else if (value.kind === "binding-key") {
+		if (!exact(value, ["kind", "key"]) || typeof value.key !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(value.key) || Buffer.from(value.key, "base64").toString("base64") !== value.key) invalid();
+	} else if (value.kind === "reference") {
+		if (!exact(value, ["kind", "id", "when", "provider", "modelId", "endpoint", "api", "fields"]) ||
+			!text(value.id) || !timestamp(value.when) || !text(value.provider) || !text(value.modelId) || !text(value.endpoint) || !text(value.api) || !object(value.fields)) invalid();
 	} else if (value.kind === "resolution") {
 		if (!exact(value, ["kind", "id", "when", "provider", "modelId", "fields", "recommendation", "provenance", "edited", "phase"],
 			["kind", "modelId", "fields", "provenance"]) || !text(value.modelId) || !object(value.fields) || !object(value.provenance)) invalid();
@@ -111,12 +116,54 @@ export class PickerRecords {
 			return { raw, events: ledgerValue(data, this.protection !== undefined) };
 		} catch { throw new RecordError(); }
 	}
+	/** Compute a stable credential binding without writing credentials or their raw hash. */
+	credentialVersion(headers: Record<string, string>): string {
+		try {
+			if (!this.protection || !object(headers)) invalid();
+			inspect(headers);
+			const entries = Object.entries(headers).map(([key, value]) => {
+				if (!/^[A-Za-z0-9-]+$/.test(key) || typeof value !== "string" || /[\r\n\0]/.test(value)) invalid();
+				return [key.toLowerCase(), value] as const;
+			}).sort(([a], [b]) => a.localeCompare(b));
+			if (new Set(entries.map(([key]) => key)).size !== entries.length) invalid();
+			let events = this.load().events; let key = events.filter((event): event is Dict => object(event) && event.kind === "binding-key").at(-1)?.key;
+			if (key === undefined) {
+				const random = randomBytes(32);
+				try { this.appendManyInternal([{ kind: "binding-key", key: random.toString("base64") }], undefined, true); } finally { random.fill(0); }
+				events = this.load().events; key = events.filter((event): event is Dict => object(event) && event.kind === "binding-key").at(-1)?.key;
+			}
+			if (typeof key !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(key)) invalid();
+			const bytes = Buffer.from(key, "base64");
+			try { return `hmac-sha256:${createHmac("sha256", bytes).update(JSON.stringify(entries)).digest("hex")}`; }
+			finally { bytes.fill(0); }
+		} catch { throw new RecordError(); }
+	}
+	/** One protected read per picker task; never returns binding keys or raw probes. */
+	referenceData(): { tests: TestRecord[]; reference(scope: Pick<TestRecord["scope"], "provider" | "modelId" | "endpoint" | "api">): { fields: Record<string, unknown>; when: number } | undefined } {
+		const events = this.load().events;
+		const tests = events.filter((event): event is Dict => object(event) && event.kind === "probe").map(event => event.report as TestRecord);
+		const references = events.filter((event): event is Dict => object(event) && event.kind === "reference").reverse();
+		return { tests, reference(scope) {
+			return references.filter(event => ["provider", "modelId", "endpoint", "api"].every(key => event[key] === scope[key as keyof typeof scope]))
+				.sort((a, b) => (b.when as number) - (a.when as number)).map(event => ({ fields: event.fields as Record<string, unknown>, when: event.when as number }))[0];
+		} };
+	}
+	/** User-confirmed settings only; proposed or failed transactions never qualify. */
+	reference(scope: Pick<TestRecord["scope"], "provider" | "modelId" | "endpoint" | "api">): Record<string, unknown> | undefined { return this.referenceData().reference(scope)?.fields; }
+	/** Return the latest matching, unexpired suite report; never expose raw events. */
+	recentSuite(scope: TestRecord["scope"], now: number): TestRecord | undefined {
+		const keys = ["provider", "modelId", "endpoint", "api", "credentialVersion"] as const;
+		return this.tests().filter((record) => record.status === "inconclusive" && record.expiresAt > now && record.testedAt <= now &&
+			keys.every((key) => record.scope?.[key] === scope[key]) && object(record.checks) && record.suiteVersion === 1)
+			.reverse().sort((a, b) => b.testedAt - a.testedAt)[0];
+	}
 	tests(passphrase?: string): TestRecord[] {
 		return this.load(passphrase).events.filter((e): e is Dict => object(e) && e.kind === "probe").map(e => e.report as TestRecord);
 	}
 	append(event: unknown, passphrase?: string): void { this.appendMany([event], passphrase); }
 	/** One authenticated ledger update for a bounded model batch, not N full re-encryptions. */
-	appendMany(batch: unknown[], passphrase?: string): void {
+	appendMany(batch: unknown[], passphrase?: string): void { this.appendManyInternal(batch, passphrase, false); }
+	private appendManyInternal(batch: unknown[], passphrase: string | undefined, ensureBinding: boolean): void {
 		let lock: number | undefined;
 		let lockIdentity: fs.Stats | undefined;
 		let temp = "";
@@ -135,7 +182,9 @@ export class PickerRecords {
 			lockIdentity = fs.fstatSync(lock);
 			fs.fchmodSync(lock, 0o600);
 			const { raw, events } = this.load(passphrase);
-			const data = { version: 1, kind: "model-pick-records", events: [...events, ...batch] };
+			const actualBatch = ensureBinding && events.some(event => object(event) && event.kind === "binding-key") ? [] : batch;
+			if (actualBatch.length === 0) return;
+			const data = { version: 1, kind: "model-pick-records", events: [...events, ...actualBatch] };
 			ledgerValue(data, this.protection !== undefined);
 			const sealed: unknown = this.protection ? { version: 2, sealed: this.protection.seal(data, "records") } : sealJson(data, passphrase!);
 			// The backend is trusted for confidentiality, not allowed unbounded/executable envelopes.

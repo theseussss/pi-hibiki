@@ -1,50 +1,106 @@
-# Hibiki · Model Workbench for Pi
+# Hibiki · Model Workspace
 
 [简体中文](README.zh-CN.md)
 
-A third-party [Pi](https://pi.dev) extension for selecting models, managing custom providers/models, and choosing a session Fast request policy. The interface is primarily Chinese.
+A third-party [Pi](https://pi.dev) extension for selecting models, managing custom providers/models, and controlling the current session's Fast request policy. The interface is primarily Chinese.
 
-## Install
+**0.1.8** preserves the approved 0.1.7 dense home and add flow, and lets users locally override native/extension chat-model context and output limits or restore inheritance. The home retains one provider per row, row-local horizontal windows, persistent search/details and interactive bottom actions; filtering and manual IDs remain separate. Source delivery, local installation/loading and GitHub publication remain separate steps; editing this repository does not upgrade already-open windows.
 
-Install with Pi:
+## Installation and entry points
 
-```sh
-pi install git:github.com/theseussss/pi-hibiki
+This is an ordinary editable TypeScript Pi package with one declared entry: `extensions/hibiki-models.ts`. No build, snapshot or source reconstruction is required. Do not load internal `extensions/model-pick.ts` separately, or stack the old standalone picker/Fast extensions with it.
+
+After reviewing a local source package, use `pi install /absolute/path/to/pi-hibiki` if desired. This repair does not automatically change existing loading configuration or reload windows. The remote address is `git:github.com/theseussss/pi-hibiki`; unpublished local changes are not present in that remote version.
+
+The compatibility target is **Node.js 24 and Pi 1.4.0**. Shared credential locking uses an explicitly version-checked host adapter. Unknown Pi versions or unverifiable SDK storage bindings disable management writes rather than guessing a HOME directory.
+
+## Everyday controls
+
+`/hibiki` and `/models` open the matrix. `/hibiki manage` and `/hibiki providers` focus the visible action strip. `/hibiki fast` or `/models fast` opens current-session policy. `/hibiki status` and `/hibiki help` provide version/help information.
+
+- **Home Tab/Shift+Tab** switches between the selected object and actions. Arrows navigate; Enter selects a model. Candidate, current session and global default are separate identities.
+- **Alt+digits** invoke visible numbered actions: 1 favorite, 2 edit/view, 3 full checks, 4 default, 5/6 reorder, 7 add model, 8 remove confirmation, 9 new provider, 0 removed items. Unmodified digits remain text.
+- Provider actions have their own template. Inapplicable digits are not reassigned. Two deliberate Left presses at the first model enter its provider column; Right returns.
+- Tasks use continuous arrow navigation and ordinary sequential Tab traversal, not mandatory region switching. Candidate/selected lists have independent cursors; selections survive search changes.
+- Alt+N/X/E/V/D, Alt+arrows, Alt+Z undo, Alt+L explicit locate, Alt+T six palettes, Alt+M/F6 actions and F1/Alt+H help remain. Saving does not silently clear a query, locate additions, change the current model or set a default.
+- Wider terminals admit more action columns; state changes at the same width do not move commands. The home catalog retains one provider per row, middle ellipsis, a row-local horizontal window and `‹`/`+N`. Only provider rows page/scroll; title/search/details/actions remain visible. It is neither independent full-width row justification nor a provider-wrapping long list. Narrow/short screens retain reading gates and keyboard paths.
+
+Ctrl+L may collide with Pi's native model picker. To assign it to Hibiki, merge `"app.model.select": []` into the existing keybindings file; do not overwrite the entire file. Commands work without that change.
+
+## Add, check and confirm
+
+```text
+Name / endpoint / API / masked direct key
+  → authorize this provider's model list, or enter exact IDs manually
+  → search / multi-select / adjust parameters
+  → authorize bounded checks, reuse applicable history, or skip
+  → real item progress, cancellation and reports
+  → separate final reviewed commit
+  → return to the matrix
 ```
 
-For local testing, use `pi install /absolute/path/to/pi-hibiki`. Review the source before installing. Start a new Pi process, then run `/hibiki` or `/models`. No build or source-restoration step is needed.
+Adding to an existing provider starts with its saved connection but no automatic request. Not read, successful empty response, all returned IDs already configured, failed/cancelled reads and no filter matches are distinct states. A filter is shown only when a candidate list exists.
 
-Do not load it alongside the old standalone model picker/Fast extension, or load `extensions/model-pick.ts` separately. The package has one entry: `extensions/hibiki-models.ts`.
+**Filtering is not discovery or manual addition.** Enter in the filter never turns the keyword into a picked ID. Exact manual IDs use a separate small form; joining selected drafts sends no request and writes no enabled configuration. Multiple exact IDs can be comma-separated. Reading this provider's upstream list still requires its own authorization.
 
-Tested integration: Node.js 24 and Pi 1.4.0. Other host versions are not guaranteed.
+An unsaved provider draft can read its own list without first publishing an empty provider or entering a model ID. Listing and capability checks are separate operations. A successful empty list is authoritative; failures retain a manual-entry path.
 
-## Use
+Draft keys stay in memory until final commit. Clearing a **new draft** withdraws its key; a blank key while editing a **saved provider** means keep existing credentials. Changing endpoint/API/key invalidates old list/report applicability. Name-only changes preserve the connection.
 
-- Search and navigate the provider/model matrix; Enter switches models, Tab toggles favorites.
-- Alt+N adds, Alt+X removes with confirmation, Alt+Z undoes an applicable removal, Alt+D saves the default, Alt+T changes colors.
-- Alt+M opens contextual actions. `/hibiki manage` and `/hibiki providers` open management actions.
-- `/hibiki fast` opens session Fast controls. `/fast [on|off|ultrafast|status|check]` is the shortcut.
+Parameters resolve per field from applicable evidence, manual confirmation, same-provider information, exact-ID templates and explicitly unconfirmed defaults. Cross-provider maps are suggestions, not channel measurements, and must be shown before adoption.
 
-Ctrl+L conflicts with Pi's built-in selector. To give it to Hibiki, merge `"app.model.select": []` into your existing Pi `keybindings.json`; do not replace the file. Slash commands work without changing keys.
+The implemented suite supports OpenAI Chat Completions and Responses: 8 requests/model, or 9 with an optional synthetic image, at most 64 output tokens/request. One authorization covers at most 3 supported models/27 requests; the remainder is explicitly untested, not automatically continued. Each model has at most 10 seconds of auth resolution plus a 90-second suite, with no retries. Price and input-token count are unknown, so there is no claimed monetary ceiling.
 
-Fast only applies to the implemented OpenAI-compatible provider/API/model paths. It is a request policy, not a promise of speed or price. `status`/`check` send no probe. Ultrafast is opt-in through `~/.pi/agent/pi-hibiki.json`:
+Only fixed synthetic samples are sent, never the current conversation or user files. A small response does not prove a maximum context window; parameter acceptance does not prove internal reasoning; one image does not prove general vision. Esc stops into a partial report; Ctrl+C abandons the task. Cancellation/timeouts do not launch subsequent requests or revive finished views. Record failures are disclosed without plaintext fallback.
+
+Existing models also have full checks. Finishing/report-only does not modify enabled configuration; applying parameter differences requires a separate review. Read-only models cannot be modified. Thinking maps retain off/minimal/low/medium/high/xhigh/max and distinguish absent defaults, explicit empty maps, null unsupported entries and literal empty strings. The `=` prefix escapes literal values. Resetting an existing map to true absence is an explicit reviewed edit, not accidental omission; unknown fields remain intact.
+
+## Local limits for native models
+
+Select a native/extension chat model such as `openai-codex`, then use the same **Edit [2]** action:
+
+- Only **context window and maximum output** are editable here. Effective values, directory references and explicit local overrides are distinct. Account/dynamic bases that cannot be established reliably remain unknown.
+- Inputs contain explicit overrides only. **Blank restores inheritance for that field.** Reset clears these two overrides rather than pinning a snapshot of the directory; other manual overrides survive.
+- A diff and separate confirmation precede writing `providers[exactProvider].modelOverrides[exactID]` in the verified profile's `models.json`. Cancel/no-op writes nothing; the native catalog is not replaced.
+- Names, reasoning/input capabilities, maps, OAuth, keys, endpoints and protocols retain their existing protection. Virtual routing aliases do not receive ineffective overrides. Unknown SDK/storage bindings remain read-only.
+- These are local Pi budgets, not an expansion of upstream capacity or recovery of compacted history. Excessive values can still exceed server limits. No discovery or paid capability test is started automatically.
+- An offline refresh updates the canonical current same-ID object only while it remains current, preserving intervening selections and the global default. Saved-but-not-refreshed outcomes are explicit.
+
+## Credentials, commit outcomes and recovery
+
+- Direct keys share Pi's **`auth.json`** with `/login`. It is **0600 plaintext**, not an extra encrypted credential vault. New keys are not added to `models.json`. Dollar signs/leading exclamation are encoded for Pi's literal config-value syntax without executing pasted input.
+- Existing OAuth/non-API-key entries are not overwritten; unrelated providers and unknown API-key metadata are preserved. No master password or parallel active-key store is introduced.
+- Provider/auth changes use coordinated commit, native-compatible leases, revision checks and protected pending recovery data. **This is not a cross-file atomic transaction.** Outcomes distinguish unchanged/compensated, pending, committed and saved-but-not-refreshed. Partial work is not presented as nothing having happened.
+- Unresolved or unreadable pending state blocks Hibiki's relevant mutation, selection and discovery/probe effects until explicit recovery. External login changes are not blindly overwritten.
+- Endpoint/API/key changes for the **current provider are refused** until switching away; name-only edits are allowed. Saving current-model metadata refreshes its canonical object only while it is still current, preserving an intervening model selection.
+- This is not a global request lock across processes. Hibiki cannot freeze/rebind other windows, other extensions or direct file editors. Local coordination does not guarantee cross-window endpoint/key binding or absolute filesystem CAS.
+- Removal archives rather than permanently deletes. Affected current/default references require replacement confirmation and then separate removal confirmation. Undo/restore never silently switch current/default; conflicts do not overwrite, and legacy data is not automatically migrated/deleted.
+
+## Platform and scope limits
+
+Protected management records/archives depend on Windows DPAPI, with WSL native synthetic tests. Linux/macOS protection backends are not implemented; unavailable protection refuses the relevant operation. Full native-Windows plugin acceptance remains outstanding.
+
+Paths derive from verified host storage, including explicit `PI_CODING_AGENT_DIR` profiles. Unknown SDK bindings allow viewing/selection without reading or writing a guessed default profile. Ultrafast configuration is read only from the verified profile's `pi-hibiki.json`.
+
+The native lease has upstream version/long-pause limitations. Old nonempty custom locks are not deleted on an age heuristic; back up and inspect ownership before repair. Abnormal termination may leave pending work or safety locks. Do not bypass them with plaintext writes.
+
+Reports are scoped to provider/model/endpoint/API/credential generation and revalidated on reuse/adoption; the current default TTL is one hour. Saving a report, synchronizing channel references and applying enabled configuration are separate actions. Configurable AI analysis/automatic sync policies and a complete per-field history comparison/rollback UI are not implemented; ledger events do not constitute those product capabilities. Other API suites remain explicitly untested.
+
+Protected archives are account-bound; copying ciphertext alone does not guarantee recovery on another machine. Extensions run with host permissions, not isolation against malicious same-user code.
+
+## Fast
+
+`/fast [on|off|ultrafast|status|check]` retains session/branch history semantics. Home Fast applies only to an eligible **current** model, never the highlighted candidate. Status/check only observe; they send no probe. Requested tier, upstream echo, actual acceleration and billing are separate facts.
+
+Ultrafast is opt-in, disabled by default in the verified profile's `pi-hibiki.json`:
 
 ```json
 { "fast": { "enableUltrafast": false } }
 ```
 
-## Important limits
+## Development and verification
 
-- **Protected management writes require Windows DPAPI, tested under WSL.** Linux/macOS credential backends are not implemented; operations needing protection fail closed. A native Windows path exists but full native Windows acceptance is not established.
-- Management currently uses `HOME/.pi/agent`; a different Pi agent directory does not fully isolate these writes.
-- Add new credentials by environment-variable name/reference, not by pasting API keys. Existing Pi configuration and old backups are not automatically encrypted or migrated.
-- Archives are Windows-account-bound; copying encrypted files alone does not guarantee recovery on another machine. Back up your configuration before management changes.
-- Upstream model-list/text checks require confirmation and may incur cost. Small text success does not prove complete model specifications.
-- Extensions have the host's OS permissions. This is not a sandbox against malicious extensions or same-user processes.
-
-## Development
-
-Edit the TypeScript source directly. With Pi and TypeScript already installed:
+Use installed Pi/TypeScript; no automatic dependency installation:
 
 ```sh
 export HIBIKI_PI_ROOT=/path/to/pi-coding-agent
@@ -52,10 +108,10 @@ export HIBIKI_TYPESCRIPT_ROOT=/path/to/typescript
 npm run verify
 ```
 
-The full suite uses temporary synthetic profiles, denied network access and fresh synthetic DPAPI data; it currently needs WSL with Windows DPAPI. It does not use real credentials or make real provider requests. Dependencies are not installed automatically. Tests are not universal platform or physical IME certification.
+Verification uses disposable synthetic profiles and network/filesystem accident guards, not real credentials/providers. Native protection tests require WSL + Windows DPAPI. Actual Pi PTY routing, rasterized character previews, native WezTerm appearance and author acceptance are recorded separately and must not be conflated. The guards are not an OS sandbox.
 
-## License
+## License and acknowledgements
 
-[MIT](LICENSE) · Copyright (c) 2026 Wang Jiacong (theseussss).
+[MIT](LICENSE), Copyright (c) 2026 Wang Jiacong (theseussss).
 
-Thanks to Pi, pi-sakura-cyberdeck and its pi-zentui upstream. See [NOTICE](NOTICE.md) for exact scope and the original licenses.
+Thanks to Pi, pi-sakura-cyberdeck and its pi-zentui upstream. See [NOTICE](NOTICE.md) for scope and preserved licenses.

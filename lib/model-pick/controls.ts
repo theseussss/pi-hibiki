@@ -3,7 +3,7 @@ import {
 	SelectList, type SelectListTheme, truncateToWidth,
 } from "@earendil-works/pi-tui";
 
-export type Paint = (kind: "accent" | "text" | "dim" | "error", value: string) => string;
+export type Paint = (kind: "accent" | "text" | "dim" | "error" | "success" | "warning", value: string) => string;
 export interface MenuAction { label: string; run(): void; description?: string }
 
 const rows = (value: number) => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
@@ -87,6 +87,7 @@ export interface ModelBasketOptions {
 	requestRender: () => void;
 	describe?: (id: string) => string;
 	onDiscover?: () => void;
+	submitHint?: string;
 	saveLabel?: (count: number) => string;
 }
 
@@ -344,8 +345,11 @@ export class ModelBasket {
 		const title = selectedPane ? `已选 ${this.picked.length} · ← 候选 · Enter 参数 · Delete 取消选择` : `候选 ${this.matches.length} · 已选 ${this.picked.length}${this.picked.length ? `（→）：${this.picked.join("、")}` : ""}`;
 		const summaryId = this.focus === "search" || this.focus === "actions" ? this.picked.at(-1) ?? id : id;
 		const summary = this.error || this.status || (summaryId && `${summaryId}${this.descriptions.get(summaryId) ? ` · ${this.descriptions.get(summaryId)}` : ""}`) || "回车添加 ID，或勾选候选";
-		const actionRows = Math.min(this.actionCount, Math.max(1, height - 3));
 		const showHint = height >= 9;
+		// Never give a keyboard-active list zero rows on short terminals. The
+		// focused action remains reachable via the native list's scroll viewport.
+		const reserveList = this.matches.length > 0 || this.picked.length > 0 ? 1 : 0;
+		const actionRows = Math.min(this.actionCount, Math.max(1, height - 3 - Number(showHint) - reserveList));
 		const listRows = Math.max(0, Math.min(20, height - 3 - actionRows - Number(showHint)));
 		const lines = [
 			...this.input.render(width),
@@ -354,7 +358,8 @@ export class ModelBasket {
 			this.options.paint(this.error ? "error" : "dim", summary),
 			...this.actionMenu.render(width, actionRows),
 		];
-		if (showHint) lines.push(this.options.paint("dim", this.focus === "search" ? "↑↓ 导航 · Enter 加入 ID · Ctrl+S 添加" : `↑↓ 导航${this.focus === "candidates" && this.picked.length ? " · → 已选" : this.focus === "selected" ? " · ← 候选" : ""} · Ctrl+S 添加`));
+		const submitHint = this.options.submitHint ?? "添加";
+		if (showHint) lines.push(this.options.paint("dim", this.focus === "search" ? `↑↓ 导航 · Enter 加入 ID · Ctrl+S ${submitHint}` : `↑↓ 导航${this.focus === "candidates" && this.picked.length ? " · → 已选" : this.focus === "selected" ? " · ← 候选" : ""} · Ctrl+S ${submitHint}`));
 		return lines.slice(0, height).map((line) => truncateToWidth(line, width, ""));
 	}
 }

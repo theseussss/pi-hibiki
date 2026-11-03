@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { loadTypeScript } from './model-pick-loader.mjs';
-import { tui, paint, plain, focusedNativeRow, baseConfig, harness as extensionHarness } from './model-pick-ui-harness.mjs';
+import { tui, paint, plain, focusedNativeRow, baseConfig, enterManualIds, harness as extensionHarness } from './model-pick-ui-harness.mjs';
 
 const { ModelBasket } = loadTypeScript(fileURLToPath(new URL('../lib/model-pick/controls.ts', import.meta.url)), { '@earendil-works/pi-tui': tui });
 const keys = { up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C', enter: '\r', save: '\x13', clear: '\x15', esc: '\x1b', remove: '\x1b[3~' };
@@ -130,22 +130,22 @@ test('arrow/render loops keep one real keyboard owner and do not resolve descrip
 
 test('production add-model task supports arrows/Enter from search through parameters to one explicit save', async (t) => {
   const p = await extensionHarness(t, { catalogEntries: [{ ...baseConfig().providers.p00.models[0], provider: 'p00', id: 'arrow-candidate' }] });
-  p.send('\x1bn'); p.type('arrow-model'); p.send('enter');
-  p.send('down'); p.send('right'); assert.match(p.screen(), /参数 · arrow-model/);
-  const before = p.raw(); p.send('enter'); assert.match(p.screen(), /arrow-model · 调整参数/); p.send('esc'); assert.equal(p.raw(), before);
-  p.send('left'); p.send('down'); assert.match(focusedNativeRow(p.raw().split('\n')), /添加1个模型/);
+  p.send('\x1bn'); enterManualIds(p, 'arrow-model');
+  p.send('up'); p.send('right'); assert.equal(p.debug().zone, 'selected');
+  const before = p.raw(); p.send('enter'); assert.match(p.screen(), /arrow-model/); assert.equal(p.debug().view, 'edit'); p.send('esc'); assert.equal(p.raw(), before);
+  p.send('down'); assert.equal(p.debug().selectedAction, 'next-models');
   assert.ok(!p.config().providers.p00.models.some((m) => m.id === 'arrow-model'));
-  p.send('enter'); await p.settled(); assert.ok(p.config().providers.p00.models.some((m) => m.id === 'arrow-model'));
+  p.send('enter'); p.select('skip'); p.select('commit'); await p.flush(); p.select('commit'); await p.settled(); assert.ok(p.config().providers.p00.models.some((m) => m.id === 'arrow-model'));
   assert.equal(p.calls.length, 0); assert.equal(p.authCalls(), 0); assert.equal(p.selections.length, 0);
 });
 
 test('production new-supplier model page requires no Tab even to edit the second pick and commit both', async (t) => {
   const p = await extensionHarness(t); p.send('left'); p.send('left'); p.send('\x1bn');
-  p.type('Arrow Bridge'); p.send('tab'); p.type('https://arrow.test/v1'); p.send('save'); // Tabs belong only to the connection form.
-  p.type('arrow-first,arrow-second'); p.send('enter'); p.send('down'); p.send('down');
-  assert.match(focusedNativeRow(p.raw().split('\n')), /参数 · arrow-second/); p.send('enter');
-  assert.match(p.screen(), /arrow-second · 调整参数/); p.send('esc'); p.send('down');
-  assert.match(focusedNativeRow(p.raw().split('\n')), /添加供应商及模型/); assert.equal(Object.keys(p.config().providers).length, 2);
-  p.send('enter'); await p.settled(); assert.deepEqual(p.config().providers['arrow-bridge'].models.map((m) => m.id), ['arrow-first', 'arrow-second']);
+  p.type('Arrow Bridge'); p.send('tab'); p.type('https://arrow.test/v1'); p.select('manual-connection'); await p.flush();
+  enterManualIds(p, 'arrow-first,arrow-second'); p.send('up'); p.send('down');
+  assert.equal(p.debug().zone, 'selected'); assert.equal(p.debug().selectedIndex, 1); p.send('enter');
+  assert.match(p.screen(), /arrow-second/); assert.equal(p.debug().view, 'edit'); p.send('esc'); p.send('down');
+  assert.equal(p.debug().selectedAction, 'next-models'); assert.equal(Object.keys(p.config().providers).length, 2);
+  p.send('enter'); p.select('skip'); p.select('commit'); await p.flush(); p.select('commit'); await p.settled(); assert.deepEqual(Object.values(p.config().providers).find(provider => provider.name === 'Arrow Bridge')?.models.map((m) => m.id), ['arrow-first', 'arrow-second'], p.readContent());
   assert.equal(p.calls.length, 0); assert.equal(p.authCalls(), 0); assert.equal(p.selections.length, 0);
 });

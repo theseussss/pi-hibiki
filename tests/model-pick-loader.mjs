@@ -28,7 +28,7 @@ export function loadTypeScript(filename, modules = {}, globals = {}) {
     wrapper((id) => {
       if (Object.hasOwn(modules, id)) return modules[id];
       if (id.startsWith('.')) return load(path.resolve(path.dirname(file), id));
-      if (['node:path', 'node:crypto', 'node:util'].includes(id)) return require(id);
+      if (['node:path', 'node:crypto', 'node:util', 'node:url'].includes(id)) return require(id);
       throw new Error(`unexpected runtime import: ${id}`);
     }, module, module.exports);
     return module.exports;

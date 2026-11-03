@@ -1,8 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { types } from 'node:util';
+import { types, isDeepStrictEqual } from 'node:util';
 import { sealJson, openJson } from './vault.js';
+import { copyThinkingLevelMap, type ThinkingLevelMap } from './reference.js';
 import type { RecordProtection } from './protection.js';
 
 export type Guard = {
@@ -14,13 +15,37 @@ export type Guard = {
   recheck?: () => Guard;
 };
 
+export type ModelLimitValues = { contextWindow?: number; maxTokens?: number };
+/** null removes an override; an absent key leaves it unchanged. */
+export type ModelLimitPatch = { contextWindow?: number | null; maxTokens?: number | null };
+
 type Dict = Record<string, unknown>;
 export type ModelInput = {
   id: string; name?: string; contextWindow: number; maxTokens: number;
-  reasoning: boolean; input: ('text' | 'image')[];
+  reasoning: boolean; input: ('text' | 'image')[]; thinkingLevelMap?: ThinkingLevelMap;
 };
 export type ProviderInput = { id: string; name: string; endpoint: string; api: string; envVar?: string };
-type ProviderEdit = { name?: string; endpoint?: string; api?: string; envVar?: string };
+export type ProviderEdit = { name?: string; endpoint?: string; api?: string; envVar?: string };
+/** Protected pending-only auth delta; NEVER retained in completed history. */
+export type ProviderCredentialDelta = {
+  version: 1; kind: 'add' | 'edit'; provider: string; authPath: string; modelsPath: string;
+  before: Dict | null; after: Dict | null; connectionChanged: boolean;
+};
+export type ProviderPlan = { kind: 'add'; provider: ProviderInput; models: ModelInput[] } |
+  { kind: 'edit'; providerId: string; patch: ProviderEdit };
+export interface ProviderPending {
+  id: string; beforeRevision: string; afterRevision: string; credential: ProviderCredentialDelta;
+}
+/** Internal coordinator capability. Never pass this object to the panel. */
+export interface ProviderStoreTransaction {
+  prepare(plan: ProviderPlan, delta: ProviderCredentialDelta, expectedRevision: string): ProviderPending;
+  pending(): ProviderPending | null;
+  models(): { revision: string; before: boolean; after: boolean };
+  stage(): void;
+  apply(): void;
+  finish(): void;
+  abort(): void;
+}
 type Archive = {
   id: string; kind: 'provider' | 'model'; provider: string; modelId?: string; createdAt: number;
   payload: Dict; binding?: { baseUrl: string | null; api: string | null };
@@ -29,7 +54,7 @@ type Archive = {
 type Operation = { kind: string; provider: string; modelId?: string; archiveId?: string };
 type Journal = {
   id: string; createdAt: number; before: string | null; after: string;
-  beforeRevision: string; afterRevision: string; operation: Operation; archivesAfter: Archive[];
+  beforeRevision: string; afterRevision: string; operation: Operation; archivesAfter: Archive[]; credential?: ProviderCredentialDelta;
 };
 type VaultState = { version: 1; archives: Archive[]; history: Journal[]; pending: Journal | null };
 type VaultRead = { raw: string | null; state: VaultState };
@@ -55,6 +80,7 @@ const MESSAGES: Record<string, string> = {
   NOT_FOUND: 'The requested provider, model, or archive was not found.',
   PENDING: 'An unfinished transaction requires explicit recovery.',
   NO_PENDING: 'There is no unfinished transaction to recover.',
+  CREDENTIAL_PENDING: 'This transaction includes credentials; use coordinated provider recovery.',
   LEGACY_PENDING: 'An unfinished legacy transaction is preserved; separately authorized legacy recovery is required.',
   IO_ERROR: 'The model management operation could not be completed safely.',
 };
@@ -78,7 +104,7 @@ const MAX_VAULT_BYTES = 128 * 1024 * 1024;
 // and authenticated-vault byte/depth limits still preflight the complete transaction.
 const MAX_BATCH_MODELS = 100;
 const HISTORY_LIMIT = 20; // Retain exactly the most recent 20 successful full before/after backups; archives are never pruned.
-const OPS = new Set(['add-provider', 'edit-provider', 'put-model', 'archive-provider', 'archive-model', 'restore-provider', 'restore-model']);
+const OPS = new Set(['add-provider', 'edit-provider', 'put-model', 'model-limits', 'archive-provider', 'archive-model', 'restore-provider', 'restore-model']);
 const own = (v: object, key: string) => Object.hasOwn(v, key);
 const object = (v: unknown): v is Dict => v !== null && typeof v === 'object' && !Array.isArray(v);
 const positive = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
@@ -171,18 +197,89 @@ function summaryEndpoint(value: unknown): string {
     return `${u.protocol}//${u.host}${u.pathname}`;
   } catch { return ''; }
 }
+function safeReferenceEndpoint(value: unknown): boolean {
+  if (typeof value !== 'string' || value.includes('?') || value.includes('#')) return false;
+  try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password && !u.search && !u.hash; }
+  catch { return false; }
+}
 function binding(p: Dict): { baseUrl: string | null; api: string | null } {
   return { baseUrl: typeof p.baseUrl === 'string' ? p.baseUrl : null, api: typeof p.api === 'string' ? p.api : null };
 }
 function models(p: Dict): Dict[] { return (p.models ?? []) as Dict[]; }
+const LIMIT_KEYS = ['contextWindow', 'maxTokens'];
+/** Only inspect the exact override path; unrelated, forward-compatible keys stay opaque. */
+function limitEntry(cfg: Config, provider: string, id: string, code: string): Dict | undefined {
+  const p = cfg.providers && own(cfg.providers, provider) ? cfg.providers[provider] : undefined;
+  if (!p || !own(p, 'modelOverrides')) return undefined;
+  if (!object(p.modelOverrides)) fail(code);
+  if (!own(p.modelOverrides, id)) return undefined;
+  const entry = p.modelOverrides[id];
+  if (!object(entry)) fail(code);
+  return entry;
+}
+function limitValues(cfg: Config, provider: string, id: string, code: string): ModelLimitValues {
+  const entry = limitEntry(cfg, provider, id, code);
+  const values: ModelLimitValues = {};
+  for (const key of LIMIT_KEYS as Array<keyof ModelLimitValues>) {
+    if (entry && own(entry, key)) {
+      if (!positive(entry[key])) fail(code);
+      values[key] = entry[key];
+    }
+  }
+  return values;
+}
+/** Canonical pruning is confined to empty ancestors of an actually changed field. */
+function applyLimitPatch(cfg: Config, provider: string, id: string, patch: ModelLimitPatch, code: string): boolean {
+  const before = limitValues(cfg, provider, id, code);
+  const next = { ...before };
+  for (const key of LIMIT_KEYS as Array<keyof ModelLimitValues>) {
+    if (!own(patch, key)) continue;
+    const value = patch[key];
+    if (value === null) delete next[key]; else next[key] = value!;
+  }
+  if (isDeepStrictEqual(before, next)) return false;
+  // The store knows only explicit overrides. Effective-pair validation involving
+  // inherited values belongs to the host's fresh catalog guard, not a guessed base.
+  if (next.contextWindow !== undefined && next.maxTokens !== undefined && next.maxTokens > next.contextWindow) fail(code === 'INVALID_CONFIG' ? 'INVALID_INPUT' : code);
+  cfg.providers ??= {};
+  if (!own(cfg.providers, provider)) cfg.providers[provider] = {};
+  const p = cfg.providers[provider];
+  const overrides = (p.modelOverrides ??= {}) as Dict;
+  if (!own(overrides, id)) overrides[id] = {};
+  const entry = overrides[id] as Dict;
+  for (const key of LIMIT_KEYS) delete entry[key];
+  Object.assign(entry, next);
+  if (Object.keys(entry).length === 0) delete overrides[id];
+  if (Object.keys(overrides).length === 0) delete p.modelOverrides;
+  if (Object.keys(p).length === 0) delete cfg.providers[provider];
+  if (Object.keys(cfg.providers).length === 0) delete cfg.providers;
+  return true;
+}
+/** Reconstruct the only permitted semantic delta, including exact empty pruning.
+ * This is also run on authenticated history/pending images before recovery can
+ * exempt a protected provider. A kind label alone is never write authority.
+ */
+function checkLimitTransition(before: Config, after: Config, operation: Operation, code: string): void {
+  const previous = limitValues(before, operation.provider, operation.modelId!, code);
+  const next = limitValues(after, operation.provider, operation.modelId!, code);
+  const patch: ModelLimitPatch = {};
+  for (const key of LIMIT_KEYS as Array<keyof ModelLimitValues>) {
+    if (previous[key] !== next[key]) patch[key] = next[key] ?? null;
+  }
+  const permitted = clone(before);
+  if (!applyLimitPatch(permitted, operation.provider, operation.modelId!, patch, code) || !isDeepStrictEqual(permitted, after)) fail(code);
+}
 /** Call only after cleanTree has rejected executable/prototype-bearing input. */
 function modelValue(input: ModelInput): Dict {
   if (!object(input) || !modelId(input.id) || (input.name !== undefined && !text(input.name)) ||
       !positive(input.contextWindow) || !positive(input.maxTokens) || input.maxTokens > input.contextWindow ||
       typeof input.reasoning !== 'boolean' || !Array.isArray(input.input) || input.input.length === 0 || input.input.length > 2 ||
       !input.input.every(x => x === 'text' || x === 'image') || new Set(input.input).size !== input.input.length) fail('INVALID_INPUT');
+  const thinkingLevelMap = input.thinkingLevelMap === undefined ? undefined : copyThinkingLevelMap(input.thinkingLevelMap);
+  if (input.thinkingLevelMap !== undefined && thinkingLevelMap === undefined) fail('INVALID_INPUT');
   return { id: input.id, ...(input.name === undefined ? {} : { name: input.name }),
-    contextWindow: input.contextWindow, maxTokens: input.maxTokens, reasoning: input.reasoning, input: [...input.input] };
+    contextWindow: input.contextWindow, maxTokens: input.maxTokens, reasoning: input.reasoning, input: [...input.input],
+    ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }) };
 }
 function batchModels(inputs: ModelInput[], existing: Dict[] = []): Dict[] {
   // Reject proxies before length/index access, and oversized arrays before walking
@@ -232,20 +329,34 @@ function checkArchives(v: unknown): asserts v is Archive[] {
   const ids = new Set<string>();
   for (const a of v) { checkArchive(a); if (ids.has(a.id)) fail('INVALID_VAULT'); ids.add(a.id); }
 }
-function checkJournal(v: unknown): asserts v is Journal {
+function credentialDelta(v: unknown): asserts v is ProviderCredentialDelta {
+  if (!object(v) || !exactKeys(v, ['version', 'kind', 'provider', 'authPath', 'modelsPath', 'before', 'after', 'connectionChanged']) ||
+      v.version !== 1 || !['add', 'edit'].includes(v.kind as string) || !providerId(v.provider) || typeof v.connectionChanged !== 'boolean' ||
+      typeof v.authPath !== 'string' || !path.isAbsolute(v.authPath) || v.authPath.includes('\0') ||
+      typeof v.modelsPath !== 'string' || !path.isAbsolute(v.modelsPath) || v.modelsPath.includes('\0')) fail('INVALID_VAULT');
+  for (const entry of [v.before, v.after]) if (entry !== null && (!object(entry) || typeof entry.type !== 'string')) fail('INVALID_VAULT');
+  if (JSON.stringify(v.before) !== JSON.stringify(v.after) && v.after !== null && (v.after as Dict).type !== 'api_key') fail('INVALID_VAULT');
+}
+function checkJournal(v: unknown, allowCredential = false): asserts v is Journal {
   if (!object(v) || !text(v.id, 128) || !positive(v.createdAt) ||
       !(v.before === null || typeof v.before === 'string') || typeof v.after !== 'string' ||
       v.beforeRevision !== revision(v.before as string | null) || v.afterRevision !== revision(v.after) ||
       !object(v.operation) || typeof v.operation.kind !== 'string' || !OPS.has(v.operation.kind) || !providerId(v.operation.provider) ||
-      !exactKeys(v, ['id', 'createdAt', 'before', 'after', 'beforeRevision', 'afterRevision', 'operation', 'archivesAfter']) ||
+      !exactKeys(v, ['id', 'createdAt', 'before', 'after', 'beforeRevision', 'afterRevision', 'operation', 'archivesAfter', 'credential'], ['id', 'createdAt', 'before', 'after', 'beforeRevision', 'afterRevision', 'operation', 'archivesAfter']) ||
       !exactKeys(v.operation, ['kind', 'provider', 'modelId', 'archiveId'], ['kind', 'provider'])) fail('INVALID_VAULT');
-  const needsModel = ['put-model', 'archive-model', 'restore-model'].includes(v.operation.kind);
+  const needsModel = ['put-model', 'model-limits', 'archive-model', 'restore-model'].includes(v.operation.kind);
   const needsArchive = v.operation.kind.startsWith('archive-') || v.operation.kind.startsWith('restore-');
   if ((needsModel && !modelId(v.operation.modelId)) || (!needsModel && v.operation.modelId !== undefined)) fail('INVALID_VAULT');
   if ((needsArchive && !text(v.operation.archiveId, 128)) || (!needsArchive && v.operation.archiveId !== undefined)) fail('INVALID_VAULT');
-  if (v.before !== null) configValue(json(v.before as string, 'INVALID_VAULT'), 'INVALID_VAULT');
-  configValue(json(v.after, 'INVALID_VAULT'), 'INVALID_VAULT');
+  const before = v.before === null ? {} : configValue(json(v.before as string, 'INVALID_VAULT'), 'INVALID_VAULT');
+  const after = configValue(json(v.after, 'INVALID_VAULT'), 'INVALID_VAULT');
+  if (v.operation.kind === 'model-limits') checkLimitTransition(before, after, v.operation as Operation, 'INVALID_VAULT');
   checkArchives(v.archivesAfter);
+  if (v.credential !== undefined) {
+    if (!allowCredential) fail('INVALID_VAULT');
+    credentialDelta(v.credential);
+    if (v.credential.provider !== v.operation.provider || v.operation.kind !== (v.credential.kind === 'add' ? 'add-provider' : 'edit-provider')) fail('INVALID_VAULT');
+  }
 }
 function vaultState(v: unknown): VaultState {
   cleanTree(v, 'INVALID_VAULT');
@@ -253,7 +364,10 @@ function vaultState(v: unknown): VaultState {
       !exactKeys(v, ['version', 'archives', 'history', 'pending'])) fail('INVALID_VAULT');
   checkArchives(v.archives);
   for (const h of v.history) checkJournal(h);
-  if (v.pending !== null) checkJournal(v.pending);
+  if (v.pending !== null) {
+    checkJournal(v.pending, true);
+    if (v.pending.operation.kind === 'model-limits' && !isDeepStrictEqual(v.pending.archivesAfter, v.archives)) fail('INVALID_VAULT');
+  }
   return v as unknown as VaultState;
 }
 /** Keep automatic payload capacity independent of the injected protection backend. */
@@ -314,11 +428,12 @@ export class PickerStore {
   private readonly protectedProviders: Set<string>;
   private passphrase: string | undefined;
 
-  constructor(agentDir: string, protectedProviders: Iterable<string> = [], protection?: RecordProtection) {
+  constructor(agentDir: string, protectedProviders: Iterable<string> = [], protection?: RecordProtection, modelsPath?: string) {
     if (typeof agentDir !== 'string' || !path.isAbsolute(agentDir) || agentDir.includes('\0')) fail('INVALID_INPUT');
     this.agentDir = path.resolve(agentDir);
     this.dataDir = path.join(this.agentDir, 'model-pick-data');
-    this.modelFile = path.join(this.agentDir, 'models.json');
+    if (modelsPath !== undefined && (!path.isAbsolute(modelsPath) || modelsPath.includes('\0'))) fail('INVALID_INPUT');
+    this.modelFile = modelsPath === undefined ? path.join(this.agentDir, 'models.json') : path.resolve(modelsPath);
     this.protection = protection;
     this.vaultFile = path.join(this.dataDir, protection ? 'vault.auto.json' : 'vault.json');
     this.indexFile = path.join(this.dataDir, protection ? 'retention-index.auto.json' : 'retention-index.json');
@@ -333,9 +448,9 @@ export class PickerStore {
   }
 
   snapshot(): { revision: string; providers: Array<{
-    id: string; name: string; endpoint: string; api: string;
+    id: string; name: string; endpoint: string; api: string; referenceUnsafe?: boolean;
     credentialState: 'reference' | 'configured' | 'missing';
-    models: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: ('text' | 'image')[] }>;
+    models: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: ('text' | 'image')[]; thinkingLevelMap?: ThinkingLevelMap; invalidThinkingLevelMap?: boolean }>;
   }> } {
     return safe(() => {
       const image = this.readModels();
@@ -344,9 +459,12 @@ export class PickerStore {
         providers: Object.entries(image.config.providers ?? {}).map(([id, p]) => ({
           id, name: typeof p.name === 'string' ? p.name : id,
           endpoint: summaryEndpoint(p.baseUrl), api: typeof p.api === 'string' && APIS.has(p.api) ? p.api : '',
+          ...(!safeReferenceEndpoint(p.baseUrl) ? { referenceUnsafe: true } : {}),
           credentialState: credential(p),
           models: models(p).map(m => ({
             id: m.id as string,
+            ...(own(m, 'thinkingLevelMap') ? (copyThinkingLevelMap(m.thinkingLevelMap) === undefined
+              ? { invalidThinkingLevelMap: true } : { thinkingLevelMap: copyThinkingLevelMap(m.thinkingLevelMap)! }) : {}),
             ...(typeof m.name === 'string' ? { name: m.name } : {}),
             ...(positive(m.contextWindow) ? { contextWindow: m.contextWindow } : {}),
             ...(positive(m.maxTokens) ? { maxTokens: m.maxTokens } : {}),
@@ -356,6 +474,32 @@ export class PickerStore {
           })),
         })),
       };
+    });
+  }
+
+  /** Read only the two local overrides, never credentials or inferred catalog values. */
+  modelLimitsOverride(provider: string, modelId: string): { revision: string; values: ModelLimitValues } {
+    return safe(() => {
+      if (!providerId(provider) || !modelIdValid(modelId)) fail('INVALID_INPUT');
+      const image = this.readModels();
+      return { revision: image.revision, values: limitValues(image.config, provider, modelId, 'INVALID_CONFIG') };
+    });
+  }
+
+  /** The host must verify an exact, live chat-model target and permission at every barrier. */
+  putModelLimitsOverride(provider: string, modelId: string, patch: ModelLimitPatch,
+    expectedRevision: string, guard: Guard, assertTarget: () => void): void {
+    safe(() => {
+      if (!providerId(provider) || !modelIdValid(modelId) || !object(guard) || typeof assertTarget !== 'function') fail('INVALID_INPUT');
+      cleanTree(patch, 'INVALID_INPUT');
+      if (!object(patch) || !exactKeys(patch, LIMIT_KEYS, []) ||
+          Object.values(patch).some(value => value !== null && !positive(value))) fail('INVALID_INPUT');
+      // Capture intent before a trusted runtime callback can run intervening work.
+      const intent = clone(patch);
+      this.mutate(expectedRevision, guard, (cfg, archives) => {
+        applyLimitPatch(cfg, provider, modelId, intent, 'INVALID_CONFIG');
+        return { archives, operation: { kind: 'model-limits', provider, modelId } };
+      }, assertTarget);
     });
   }
 
@@ -464,8 +608,13 @@ export class PickerStore {
     });
   }
 
-  putModel(provider: string, input: ModelInput, mode: 'add' | 'edit', expectedRevision: string, guard?: Guard): void {
+  putModel(provider: string, input: ModelInput, mode: 'add' | 'edit', expectedRevision: string, guard?: Guard, edit?: { unsetThinkingLevelMap?: boolean }): void {
     this.mutate(expectedRevision, guard, (cfg, archives) => {
+      if (edit !== undefined) {
+        cleanTree(edit, 'INVALID_INPUT');
+        if (!object(edit) || !exactKeys(edit, ['unsetThinkingLevelMap']) || typeof edit.unsetThinkingLevelMap !== 'boolean'
+          || mode !== 'edit' || (edit.unsetThinkingLevelMap && input.thinkingLevelMap !== undefined)) fail('INVALID_INPUT');
+      }
       const p = this.provider(cfg, provider);
       cleanTree(input, 'INVALID_INPUT');
       const value = modelValue(input);
@@ -474,6 +623,9 @@ export class PickerStore {
       if (mode === 'add' && at !== -1) fail('EXISTS');
       if (mode === 'edit' && at === -1) fail('NOT_FOUND');
       const next = { ...(at === -1 ? {} : list[at]), ...value };
+      // Absence normally preserves an unedited wire map. Only an explicit,
+      // separately reviewed edit may reset that one known field to Pi defaults.
+      if (edit?.unsetThinkingLevelMap) delete next.thinkingLevelMap;
       if (at === -1) list.push(next); else list[at] = next;
       p.models = list;
       return { archives, operation: { kind: 'put-model', provider, modelId: input.id } };
@@ -527,7 +679,15 @@ export class PickerStore {
     });
   }
 
-  recover(expectedRevision: string, guard?: Guard): void {
+  pendingDetails(): { id: string; kind: string; provider: string; modelId?: string } | null {
+    return safe(() => {
+      if (this.vaultContainer(this.foreignVaultFile, this.protection ? 1 : 2)?.pending) fail(this.protection ? 'LEGACY_PENDING' : 'PENDING');
+      const pending = this.readVault(this.requireUnlocked()).state.pending;
+      return pending ? { id: pending.id, kind: pending.operation.kind, provider: pending.operation.provider,
+        ...(pending.operation.modelId === undefined ? {} : { modelId: pending.operation.modelId }) } : null;
+    });
+  }
+  recover(expectedRevision: string, guard?: Guard, expectedPendingId?: string): void {
     safe(() => {
       const passphrase = this.requireUnlocked();
       this.writeGuard(guard);
@@ -536,37 +696,193 @@ export class PickerStore {
         const image = this.readModels(); this.expected(image.revision, expectedRevision);
         const current = this.readVault(passphrase); const pending = current.state.pending;
         if (!pending) fail('NO_PENDING');
-        this.mutableProvider(pending.operation.provider);
+        if (pending.credential) fail('CREDENTIAL_PENDING');
+        if (expectedPendingId !== undefined && pending.id !== expectedPendingId) fail('CONFLICT');
+        // checkJournal has already replay-validated the exact metadata-only delta.
+        // Recovery needs no live catalog target: a vanished ID is ignored by the SDK.
+        if (pending.operation.kind !== 'model-limits') this.mutableProvider(pending.operation.provider);
         if (image.revision !== pending.beforeRevision && image.revision !== pending.afterRevision) fail('CONFLICT');
+        let modelRevision = image.revision;
+        const revisionBarrier = (): void => {
+          if (pending.operation.kind === 'model-limits') this.expected(this.readModels().revision, modelRevision);
+        };
         const completedRaw = this.sealedState(this.completedState(current.state), passphrase);
         const unapplied = image.revision === pending.beforeRevision;
         // Protection can block synchronously while another process changes runtime
         // guards. Only before-image recovery can still prevent an archive deletion.
-        this.writeGuard(guard, unapplied ? pending.operation : undefined);
+        this.writeGuard(guard, unapplied ? pending.operation : undefined); revisionBarrier();
         if (unapplied) {
-          this.writeIndex(retainedFrom([...current.state.archives, ...pending.archivesAfter]), guard);
+          this.writeIndex(retainedFrom([...current.state.archives, ...pending.archivesAfter]), guard, revisionBarrier);
           this.atomicWrite(this.modelFile, pending.after, image.raw, MAX_BYTES,
-            () => this.writeGuard(guard, pending.operation));
+            () => { this.writeGuard(guard, pending.operation); revisionBarrier(); });
+          modelRevision = pending.afterRevision;
           if (this.readModels().revision !== pending.afterRevision) fail('CONFLICT');
         }
-        this.finish(current, completedRaw, guard);
+        this.finish(current, completedRaw, guard, revisionBarrier);
       });
     });
   }
 
+  /** Read-only binding verification for the provider coordinator. */
+  storagePaths(): { agentDir: string; modelsPath: string } { return { agentDir: this.agentDir, modelsPath: this.modelFile }; }
+
+  providerPending(): ProviderPending | null {
+    return safe(() => {
+      this.assertForeignSettled();
+      const value = this.readVault(this.requireUnlocked()).state.pending;
+      if (value && !value.credential) fail('LEGACY_PENDING');
+      return value ? { id: value.id, beforeRevision: value.beforeRevision, afterRevision: value.afterRevision, credential: clone(value.credential!) } : null;
+    });
+  }
+
+  /** Store lock stays held across native async lease acquisition. No legacy mutator bypasses it. */
+  async withProviderTransaction<T>(recover: boolean, barrier: () => void, work: (tx: ProviderStoreTransaction) => Promise<T>): Promise<T> {
+    let lock: Lock | undefined;
+    try {
+      const passphrase = this.requireUnlocked(); barrier();
+      lock = this.acquireLock(recover); this.assertForeignSettled();
+      let prepared: { current: VaultRead; pending: Journal; journalRaw: string; completedRaw: string; abortedRaw: string;
+        journalState: VaultState; completed: VaultState; aborted: VaultState } | undefined;
+      let base: VaultRead | undefined;
+      // Authenticate once OUTSIDE the native lease. Under the store lock, only
+      // exact pre-authenticated/generated images may be used thereafter. This
+      // avoids DPAPI/subprocess/crypto calls while the native lease is held.
+      const load = (): VaultRead => {
+        if (!base) { base = this.readVault(passphrase); return base; }
+        const raw = this.readRegular(this.vaultFile, true, true, MAX_VAULT_BYTES);
+        if (raw === base.raw) return base;
+        if (prepared) {
+          if (raw === prepared.journalRaw) return { raw, state: prepared.journalState };
+          if (raw === prepared.completedRaw) return { raw, state: prepared.completed };
+          if (raw === prepared.abortedRaw) return { raw, state: prepared.aborted };
+        }
+        return fail('CONFLICT');
+      };
+      const pending = (): Journal | null => {
+        const value = load().state.pending;
+        if (value && !value.credential) fail('LEGACY_PENDING');
+        if (value?.credential && value.credential.modelsPath !== this.modelFile) fail('CONFLICT');
+        return value;
+      };
+      const detail = (value: Journal): ProviderPending => ({ id: value.id, beforeRevision: value.beforeRevision, afterRevision: value.afterRevision, credential: clone(value.credential!) });
+      const active = (): Journal => { const value = pending(); if (!value) fail('NO_PENDING'); if (prepared && prepared.pending.id !== value.id) fail('CONFLICT'); return value; };
+      const tx: ProviderStoreTransaction = {
+        prepare: (plan, suppliedDelta, expectedRevision) => {
+          barrier(); cleanTree(plan, 'INVALID_INPUT'); cleanTree(suppliedDelta, 'INVALID_INPUT'); credentialDelta(suppliedDelta);
+          const before = this.readModels(); this.expected(before.revision, expectedRevision);
+          const current = load(); if (current.state.pending) fail('PENDING');
+          const cfg = clone(before.config); const delta = clone(suppliedDelta);
+          if (delta.modelsPath !== this.modelFile) fail('CONFLICT');
+          let provider: string;
+          if (plan.kind === 'add') {
+            const p = this.newProvider(cfg, plan.provider); p.models = batchModels(plan.models);
+            cfg.providers ??= {}; cfg.providers[plan.provider.id] = p; provider = plan.provider.id;
+            delta.connectionChanged = true;
+          } else if (plan.kind === 'edit') {
+            provider = plan.providerId; const p = this.provider(cfg, provider); const old = clone(p); const input = plan.patch;
+            if (!object(input) || !exactKeys(input, ['name', 'endpoint', 'api', 'envVar'], [])) fail('INVALID_INPUT');
+            if (input.name !== undefined) { if (!text(input.name)) fail('INVALID_INPUT'); p.name = input.name; }
+            if (input.endpoint !== undefined) p.baseUrl = endpoint(input.endpoint);
+            if (input.api !== undefined) { if (!APIS.has(input.api)) fail('INVALID_INPUT'); p.api = input.api; }
+            this.applyEnv(p, input.envVar);
+            delta.connectionChanged = old.baseUrl !== p.baseUrl || old.api !== p.api || old.apiKey !== p.apiKey || JSON.stringify(delta.before) !== JSON.stringify(delta.after);
+          } else return fail('INVALID_INPUT');
+          if (provider !== delta.provider || plan.kind !== delta.kind) fail('INVALID_INPUT');
+          configValue(cfg); const after = encode(cfg);
+          const value: Journal = { id: randomUUID(), createdAt: Date.now(), before: before.raw, after,
+            beforeRevision: before.revision, afterRevision: revision(after), operation: { kind: plan.kind === 'add' ? 'add-provider' : 'edit-provider', provider },
+            archivesAfter: clone(current.state.archives), credential: delta };
+          const state: VaultState = { ...current.state, pending: value };
+          // Both completion and rollback ciphertext are prepared before the native
+          // lease or any auth mutation. Auth images are absent from both.
+          const completed = this.completedState(state); const aborted: VaultState = { ...current.state, pending: null };
+          const completedRaw = this.sealedState(completed, passphrase);
+          const abortedRaw = this.sealedState(aborted, passphrase);
+          const journalRaw = this.sealedState(state, passphrase);
+          prepared = { current, pending: value, journalRaw, completedRaw, abortedRaw, journalState: state, completed, aborted };
+          barrier(); return detail(value);
+        },
+        pending: () => { const value = pending(); return value ? detail(value) : null; },
+        models: () => {
+          const value = pending() ?? prepared?.pending; if (!value) fail('NO_PENDING');
+          const image = this.readModels(); return { revision: image.revision, before: image.revision === value.beforeRevision, after: image.revision === value.afterRevision };
+        },
+        stage: () => {
+          if (!prepared) fail('INVALID_INPUT');
+          this.expected(this.readModels().revision, prepared.pending.beforeRevision);
+          this.atomicWrite(this.vaultFile, prepared.journalRaw, prepared.current.raw, MAX_VAULT_BYTES, barrier);
+        },
+        apply: () => {
+          const value = active(); const image = this.readModels(); this.expected(image.revision, value.beforeRevision);
+          this.writeIndex(retainedFrom([...load().state.archives, ...value.archivesAfter]), undefined, barrier); barrier();
+          this.atomicWrite(this.modelFile, value.after, image.raw, MAX_BYTES, barrier);
+        },
+        finish: () => {
+          const current = load(); const value = active(); this.expected(this.readModels().revision, value.afterRevision);
+          // Recovery preflights this ciphertext outside the native lease too.
+          if (!prepared || prepared.pending.id !== value.id) fail('CONFLICT');
+          const completedRaw = prepared.completedRaw;
+          barrier(); this.writeIndex(retainedFrom(value.archivesAfter), undefined, barrier);
+          this.atomicWrite(this.vaultFile, completedRaw, current.raw, MAX_VAULT_BYTES, barrier);
+        },
+        abort: () => {
+          const current = load(); const value = active(); this.expected(this.readModels().revision, value.beforeRevision);
+          if (!prepared || prepared.pending.id !== value.id) fail('CONFLICT');
+          const abortedRaw = prepared.abortedRaw;
+          barrier(); this.writeIndex(retainedFrom(current.state.archives), undefined, barrier);
+          this.atomicWrite(this.vaultFile, abortedRaw, current.raw, MAX_VAULT_BYTES, barrier);
+        },
+      };
+      // Recovery seals outside the native lease; no writes, and the pending id
+      // and complete images are revalidated again by the coordinator.
+      if (recover) {
+        const current = load(); const value = pending();
+        if (value) {
+          const completed = this.completedState(current.state); const aborted: VaultState = { ...current.state, pending: null };
+          prepared = { current, pending: value, journalRaw: current.raw!, journalState: current.state, completed, aborted,
+            completedRaw: this.sealedState(completed, passphrase), abortedRaw: this.sealedState(aborted, passphrase) };
+        }
+      }
+      return await work(tx);
+    } finally {
+      if (lock) {
+        if (this.readRegular(this.lockFile, false, true) !== lock.raw) fail('CONFLICT');
+        fs.unlinkSync(this.lockFile); this.syncDirectory(this.dataDir);
+      }
+    }
+  }
+
   private mutate(expectedRevision: string, guard: Guard | undefined,
-    plan: (cfg: Config, archives: Archive[]) => { archives: Archive[]; operation: Operation }): void {
+    plan: (cfg: Config, archives: Archive[]) => { archives: Archive[]; operation: Operation }, assertTarget?: () => void): void {
     safe(() => {
+      let modelRevision = expectedRevision;
+      const targetBarrier = (): void => {
+        assertTarget?.();
+        // A live-catalog callback (or intervening synchronous work) must not turn
+        // the protected metadata exception into an overwrite of a fresh config.
+        if (assertTarget) this.expected(this.readModels().revision, modelRevision);
+      };
+      const barrier = (operation?: Operation): void => { this.writeGuard(guard, operation); targetBarrier(); };
       const passphrase = this.requireUnlocked();
-      this.writeGuard(guard);
+      barrier();
       this.withLock(false, () => {
+        if (assertTarget) barrier();
         this.assertForeignSettled();
         const before = this.readModels(); this.expected(before.revision, expectedRevision);
         const current = this.readVault(passphrase);
         if (current.state.pending) fail('PENDING');
+        if (assertTarget) barrier();
         const cfg = clone(before.config);
         const planned = plan(cfg, clone(current.state.archives));
         configValue(cfg); checkArchives(planned.archives);
+        if (planned.operation.kind === 'model-limits') {
+          if (!isDeepStrictEqual(planned.archives, current.state.archives)) fail('INVALID_VAULT');
+          if (isDeepStrictEqual(cfg, before.config)) {
+            barrier(); this.expected(this.readModels().revision, expectedRevision);
+            return; // No history, index, or models write for unchanged intent.
+          }
+          checkLimitTransition(before.config, cfg, planned.operation, 'INVALID_VAULT');
+        }
         const after = encode(cfg);
         const pending: Journal = { id: randomUUID(), createdAt: Date.now(), before: before.raw, after,
           beforeRevision: before.revision, afterRevision: revision(after), operation: planned.operation, archivesAfter: planned.archives };
@@ -579,33 +895,35 @@ export class PickerStore {
         // Recheck live guards after both crypto preflights and before journaling;
         // a refusal here leaves no pending transaction or applied models change.
         this.atomicWrite(this.vaultFile, journalRaw, current.raw, MAX_VAULT_BYTES,
-          () => this.writeGuard(guard, planned.operation));
+          () => barrier(planned.operation));
         // A conservative index is durable before any identities leave models.json.
         // It is completed again before clearing pending; it is never decrypted truth.
-        this.writeIndex(retainedFrom([...current.state.archives, ...planned.archives]), guard);
+        this.writeIndex(retainedFrom([...current.state.archives, ...planned.archives]), guard, targetBarrier);
         // Index/staging IO is intervening work too. Refresh at the final rename
         // barrier; refusal preserves the authenticated, unapplied pending journal.
         this.atomicWrite(this.modelFile, after, before.raw, MAX_BYTES,
-          () => this.writeGuard(guard, planned.operation));
+          () => barrier(planned.operation));
+        modelRevision = pending.afterRevision;
         if (this.readModels().revision !== pending.afterRevision) fail('CONFLICT');
-        this.finish({ raw: journalRaw, state: journalState }, completedRaw, guard);
+        this.finish({ raw: journalRaw, state: journalState }, completedRaw, guard, targetBarrier);
       });
     });
   }
 
   private completedState(state: VaultState): VaultState {
     const pending = state.pending!;
+    const { credential: _pendingOnly, ...history } = pending;
     return { version: 1, archives: pending.archivesAfter,
-      history: [...state.history, pending].slice(-HISTORY_LIMIT), pending: null };
+      history: [...state.history, history].slice(-HISTORY_LIMIT), pending: null };
   }
-  private finish(current: VaultRead, completedRaw: string, guard?: Guard): void {
+  private finish(current: VaultRead, completedRaw: string, guard?: Guard, barrier?: () => void): void {
     const pending = current.state.pending!;
     if (this.readModels().revision !== pending.afterRevision) fail('CONFLICT');
     // Models already match the after image. Busy still guards metadata writes,
     // but archive guards cannot retroactively undo an applied models change.
-    this.writeIndex(retainedFrom(pending.archivesAfter), guard);
+    this.writeIndex(retainedFrom(pending.archivesAfter), guard, barrier);
     this.atomicWrite(this.vaultFile, completedRaw, current.raw, MAX_VAULT_BYTES,
-      () => this.writeGuard(guard));
+      () => { this.writeGuard(guard); barrier?.(); });
   }
 
   private requireUnlocked(): string | undefined {
@@ -726,12 +1044,12 @@ export class PickerStore {
     if (Buffer.byteLength(raw) > MAX_VAULT_BYTES) fail('IO_ERROR');
     return raw;
   }
-  private writeIndex(value: Retention, guard?: Guard): void {
+  private writeIndex(value: Retention, guard?: Guard, barrier?: () => void): void {
     // If present, an index must still be a safe regular file; its contents are not
     // used to decide archive state or recovery. Only provider/full-model IDs go here.
     const before = this.readRegular(this.indexFile, true, true);
     this.atomicWrite(this.indexFile, encode(value), before, MAX_BYTES,
-      () => this.writeGuard(guard));
+      () => { this.writeGuard(guard); barrier?.(); });
   }
 
   /** Presence only: never decrypts legacy data or resolves any credentials. */
