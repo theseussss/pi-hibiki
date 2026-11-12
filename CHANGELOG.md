@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9 — 2026-11-12
+
+- Rename the product to **Pi Models** (`pi-models`), with one shared UI identity and `/models status|help`. `/hibiki` remains an exact legacy alias; the existing entry, config, favorite/order paths, Fast history and protected-record identifiers are unchanged.
+- Fix favorites/order/defaults disappearing after a Pi update: exact profile discovery is read-only and independent of credential-lock/write compatibility. Unverified write backends retain saved preferences without enabling management mutations. Opening a partial catalog no longer prunes absent identities from favorites/order on any host.
+- Add the reviewed **Pi 1.5.2** credential-lock and native metadata layout alongside Pi 1.4.0. Unsupported hosts, unknown/mismatched SDK storage and missing native APIs still fail closed for writes.
+- Preserve the dense one-provider-per-row home and all existing confirmation/credential protections. No user-data migration, automatic deployment, window reload or remote repository rename.
+
 ## 0.1.8 — 2026-11-03
 
 This release includes the improvements developed since the initial public 0.1.0 release.

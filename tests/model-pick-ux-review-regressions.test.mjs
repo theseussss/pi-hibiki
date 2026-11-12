@@ -28,7 +28,7 @@ for (const [mode, keys] of [
   const config = baseConfig(); config.providers.p01.name = '星河'; const p = await harness(t, { config });
   for (const key of keys) p.send(key);
   assert.match(p.screen(), /▸ 星河/); assert.match(p.screen(), /M1/); assert.ok(!p.screen().includes('M0'));
-  p.send('clear'); assert.match(p.screen(), /Hibiki · 模型工作台/); assert.match(p.screen(), /M0/); assert.match(p.screen(), /M1/); assert.equal(p.selections.length, 0); assert.equal(p.calls.length, 0);
+  p.send('clear'); assert.match(p.screen(), /Pi Models · 模型管理/); assert.match(p.screen(), /M0/); assert.match(p.screen(), /M1/); assert.equal(p.selections.length, 0); assert.equal(p.calls.length, 0);
 });
 
 test('matrix paste command-looking chunks cannot start add/remove or close picker', async t => {

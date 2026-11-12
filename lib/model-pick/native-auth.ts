@@ -1,8 +1,9 @@
-/** Pi 1.4.0 compatibility boundary. No public auth-store API is assumed. */
+/** Verified Pi credential-lock boundary. No public auth-store API is assumed. */
 import { getAgentDir, getPackageDir, VERSION } from '@earendil-works/pi-coding-agent';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { types } from 'node:util';
+import { isVerifiedPiVersion } from './pi-compat.js';
 
 export interface StorageBinding { agentDir: string; modelsPath: string; authPath: string }
 /** Native async 30s leases are preserved. Pi's own sync 10s stale/async 15s
@@ -26,7 +27,7 @@ function normalize(binding: StorageBinding): StorageBinding {
   return { agentDir: path.resolve(binding.agentDir), modelsPath: path.resolve(binding.modelsPath), authPath: path.resolve(binding.authPath) };
 }
 export async function resolveNativeAuth(registry: unknown, override?: StorageBinding): Promise<{ storage: StorageBinding; native: NativeAuthBackend }> {
-  if (VERSION !== '1.4.0') throw new NativeAuthError('UNSUPPORTED_PI');
+  if (!isVerifiedPiVersion(VERSION)) throw new NativeAuthError('UNSUPPORTED_PI');
   const runtime = own(registry, 'runtime');
   if (runtime && typeof runtime === 'object' && types.isProxy(runtime)) throw new NativeAuthError('STORAGE_UNKNOWN');
   const credentials = own(runtime, 'credentials');

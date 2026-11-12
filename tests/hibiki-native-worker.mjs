@@ -1,5 +1,6 @@
 // Real installed loader/runner/SessionManager/formal component/services.
-// Synthetic isolated file-backed SDK binding; no Agent, PTY, provider or real profile.
+// Real file-backed ModelRuntime in an isolated synthetic profile; no Agent,
+// PTY, provider request, login or real credentials/profile.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,6 +20,10 @@ const modelConfig=JSON.stringify({futureRoot:{keep:true},providers:{'clf-respons
 const settings=JSON.stringify({defaultProvider:a.provider,defaultModel:a.id,futurePreference:{keep:true}});
 fs.writeFileSync(path.join(agent,'models.json'),modelConfig,{mode:0o600});
 fs.writeFileSync(path.join(agent,'settings.json'),settings,{mode:0o600});
+const favorites=JSON.stringify([`${a.provider}/${a.id}`,'unavailable/keep-favorite'],null,2)+'\n';
+const order=JSON.stringify({providers:[a.provider],models:{[a.provider]:[b.id,a.id]}},null,2)+'\n';
+fs.writeFileSync(path.join(agent,'model-pick-favorites.json'),favorites,{mode:0o600});
+fs.writeFileSync(path.join(agent,'model-pick-order.json'),order,{mode:0o600});
 const host=piRoot(), hostImport=rel=>import(pathToFileURL(path.join(host,rel)));
 const sdk=await hostImport('dist/index.js');
 const tuiModule=await hostImport('node_modules/@earendil-works/pi-tui/dist/index.js');
@@ -62,9 +67,17 @@ const ui={theme:theme.theme,notify:(message,type)=>notices.push({message,type}),
   });
 }};
 const forbidden=()=>{throw new Error('Model/auth/tool/network action forbidden in native Hibiki test');};
-// Exact file paths match host storage. This shape is a synthetic SDK file-backed
-// registry assertion, not a HOME fallback. The native-auth adapter itself is real.
-const registry={runtime:{modelsPath:path.join(agent,'models.json'),credentials:{store:{authPath:path.join(agent,'auth.json')}}},refresh:async options=>{assert.equal(options.allowNetwork,false);refreshes.push(options);},getAvailable:()=>[a,b],getAll:()=>[a,b],getRegisteredProviderIds:()=>[],find:(provider,id)=>[a,b].find(m=>m.provider===provider&&m.id===id),getProviderAuthStatus:()=>({configured:true}),getApiKeyAndHeaders(){authCalls++;return forbidden();}};
+// Actual installed SDK storage descriptors/catalog, not a hand-built binding.
+// The only credentials are the inline synthetic key above, in this temp profile.
+const {ModelRegistry}=await hostImport('dist/core/model-registry.js');
+const modelRuntime=await sdk.ModelRuntime.create({modelsPath:path.join(agent,'models.json'),authPath:path.join(agent,'auth.json'),refreshOnCreate:false,allowModelNetwork:false});
+const registry=new ModelRegistry(modelRuntime);
+await registry.refresh({allowNetwork:false});
+assert.equal(registry.runtime.modelsPath,path.join(agent,'models.json'));
+assert.equal(registry.runtime.credentials.store.authPath,path.join(agent,'auth.json'));
+const nativeRefresh=registry.refresh.bind(registry);
+registry.refresh=async options=>{assert.equal(options.allowNetwork,false);refreshes.push(options);return nativeRefresh(options);};
+registry.getApiKeyAndHeaders=()=>{authCalls++;return forbidden();};
 const runner=new ExtensionRunner(loaded.extensions,runtime,home,manager,registry);
 runner.onError(error=>errors.push(error));
 runner.bindCore({sendMessage:forbidden,sendUserMessage:forbidden,appendEntry:(kind,data)=>manager.appendCustomEntry(kind,data),getSessionName:()=>manager.getSessionName(),setSessionName:forbidden,setLabel:forbidden,getActiveTools:()=>[],getAllTools:()=>[],getSettings:()=>({}),setActiveTools:forbidden,refreshTools(){},getCommands:()=>[],setModel:async model=>{selections.push(model);current=model;return true;},getThinkingLevel:()=> 'high',setThinkingLevel:forbidden},
@@ -76,25 +89,31 @@ const raw=async(data)=>emit('provider_stream_event',{provider:current.provider,a
 const request=()=>runner.emitBeforeProviderRequest({model:current.id,input:'synthetic only'});
 async function open(name,args='') {panel=undefined;const pending=command(name,args);for(let i=0;i<100&&!panel;i++)await new Promise(setImmediate);assert.ok(panel,'native formal component was not constructed');assert.equal(typeof panel.debug,'function');render();assert.deepEqual(overlays.at(-1),{overlay:true,overlayOptions:{anchor:'bottom-center',width:'100%',maxHeight:'100%',margin:0}});return {pending};}
 function checkWidths(){for(const width of [1,2,4,8,20,30,40,64,80,120,160]){terminal.columns=width;const rendered=render();assert.ok(rendered.every(line=>tuiModule.visibleWidth(line)<=width),`oversize width ${width}`);assert.ok(!rendered.join('').includes('SYNTHETIC-NOT-A-CREDENTIAL'));}terminal.columns=120;render();}
-const unchanged=()=>{assert.equal(fs.readFileSync(path.join(agent,'settings.json'),'utf8'),settings);assert.equal(fs.readFileSync(path.join(agent,'models.json'),'utf8'),modelConfig);};
+const unchanged=()=>{assert.equal(fs.readFileSync(path.join(agent,'settings.json'),'utf8'),settings);assert.equal(fs.readFileSync(path.join(agent,'models.json'),'utf8'),modelConfig);assert.equal(fs.readFileSync(path.join(agent,'model-pick-favorites.json'),'utf8'),favorites);assert.equal(fs.readFileSync(path.join(agent,'model-pick-order.json'),'utf8'),order);};
 async function close(opened){for(let i=0;i<8&&panel.debug().view!=='matrix';i++)press('\x1b');if(panel.debug().actionMode)press('\x1b');press('\x1b');await opened.pending;}
 
 await emit('session_start',{reason:'startup'});
 assert.equal(statuses.get('gpt-fast-mode'),'⚡ FAST↑');
-await command('hibiki','status');assert.match(notices.at(-1).message,/Hibiki · 模型工作台/);
+await command('models','status');assert.match(notices.at(-1).message,/Pi Models · 模型管理 0\.1\.9/);
+await command('hibiki','status');assert.match(notices.at(-1).message,/Pi Models · 模型管理 0\.1\.9/);
 assert.equal((await request()).service_tier,'priority');
 await raw({type:'response.created',response:{id:'synthetic-response',service_tier:'auto'}});
 await command('fast','check');assert.match(notices.at(-1).message,/上游未回显/);
 await raw({type:'response.completed',response:{id:'synthetic-response',service_tier:'default'}});
 await command('fast','status');assert.match(notices.at(-1).message,/上游service_tier=default/);assert.match(notices.at(-1).message,/不作为实际加速或计费的证明/);
 const matrix=await open('models');checkWidths();frames.push({name:'matrix',lines:lines(80)});
+assert.deepEqual(panel.debug().matrixCells.map(cell=>cell.mid),[b.id,a.id]);assert.match(screen(),/★/);
+// Toggle the initially unstarred other model twice through the actual input path.
+// Preference writes must land in the SDK profile, not a guessed CLI HOME.
+press('\x1b[D');press('\x1b1');assert.ok(JSON.parse(fs.readFileSync(path.join(agent,'model-pick-favorites.json'),'utf8')).includes(`${b.provider}/${b.id}`));
+press('\x1b1');press('\x1b[C');unchanged();
 assert.equal(theme.theme.appearance,'dark');assert.equal(typeof theme.theme.style,'function');
 const dark=render().join('\n');
 assert.equal(theme.setTheme('light',false).success,true);panel.invalidate();render();
 assert.equal(theme.theme.appearance,'light');const light=render().join('\n');
 frames.push({name:'matrix-light',lines:lines(80)});
 assert.equal(theme.setTheme('dark',false).success,true);panel.invalidate();render();
-assert.match(screen(),/Hibiki · 模型工作台/);
+assert.match(screen(),/Pi Models · 模型管理/);
 type('future');assert.match(screen(),/future/);assert.equal(current,a);
 assert.equal(panel.debug().actionSlots.find(s=>s.key==='fast')?.actionIndex,null,'candidate is not the current-session Fast target');
 press('\x1bm');assert.match(screen(),/操作 模型 clf-responses\/gpt-4\.1/);assert.doesNotMatch(screen(),/更多…/);press('\x1b');assert.match(screen(),/future/);await close(matrix);
@@ -130,4 +149,4 @@ const untouched={model:a.id,input:'synthetic only',service_tier:'auto'};assert.e
 runner.invalidate('native fixture complete');
 assert.deepEqual(errors,[]);assert.equal(mountedOverlays,customCalls);assert.equal(closedOverlays,customCalls);assert.equal(tui.hasOverlay(),false);assert.equal(authCalls,0);assert.equal(selections.length,0);assert.ok(refreshes.length>=2);assert.ok(redraws>0);unchanged();
 assert.notEqual(light,dark,'open picker must refresh appearance-dependent palette on native theme invalidation');
-console.log(JSON.stringify({native:'PASS',entry:path.basename(source),commands:3,policyHooks:1,observerHooks:1,widths:[1,2,4,8,20,30,40,64,80,120,160],nativeOverlayMounted:true,nondefaultProfile:true,themeAppearances:['dark','light'],overlay:{anchor:'bottom-center',width:'100%',maxHeight:'100%',margin:0},currentDefaultUnchanged:true,branchRestore:true,headlessFast:true,authCalls,selections:selections.length,realNetworkRequests:0,frames}));
+console.log(JSON.stringify({native:'PASS',entry:path.basename(source),commands:3,policyHooks:1,observerHooks:1,widths:[1,2,4,8,20,30,40,64,80,120,160],nativeOverlayMounted:true,nondefaultProfile:true,realFileBackedRuntime:true,favoritesRestored:true,orderRestored:true,themeAppearances:['dark','light'],overlay:{anchor:'bottom-center',width:'100%',maxHeight:'100%',margin:0},currentDefaultUnchanged:true,branchRestore:true,headlessFast:true,authCalls,selections:selections.length,realNetworkRequests:0,frames}));

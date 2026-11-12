@@ -6,7 +6,7 @@ import { root, direct } from './tooling.mjs';
 // Check what will ship, without creating or reading any user configuration.
 export function checkPackage(base = root) {
   const pkg = JSON.parse(fs.readFileSync(path.join(base, 'package.json'), 'utf8'));
-  assert.equal(pkg.name, 'pi-hibiki'); assert.equal(pkg.license, 'MIT');
+  assert.equal(pkg.name, 'pi-models'); assert.equal(pkg.license, 'MIT');
   assert.equal(pkg.author, 'Wang Jiacong (theseussss)');
   assert.deepEqual(pkg.pi, { extensions: ['./extensions/hibiki-models.ts'], themes: [] });
   assert.equal(pkg.dependencies, undefined, 'Pi supplies the runtime peer packages');

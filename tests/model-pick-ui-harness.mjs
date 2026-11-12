@@ -28,7 +28,7 @@ export function focusedNativeRow(lines) {
 }
 /** Test-only native adapter: bounded FS + exact host paths, never real SDK IO.
  * Real lease/literal/CAS coverage lives in the native backend safety suites. */
-export function syntheticNativeAuth(boundedFs, agentDir) {
+export function syntheticNativeAuth(boundedFs, agentDir, version = '1.4.0') {
   // Match the native adapter's runtime exports as well as its resolver. The real
   // coordinator uses instanceof before classifying StoreError/AuthFileError;
   // an omitted constructor would mask those failures as generic IO_ERROR.
@@ -36,6 +36,7 @@ export function syntheticNativeAuth(boundedFs, agentDir) {
     constructor(code) { super(code); this.code = code; this.name = 'NativeAuthError'; }
   }
   return { NativeAuthError, async resolveNativeAuth(registry, override) {
+    if (!['1.4.0', '1.5.2'].includes(version)) throw new NativeAuthError('UNSUPPORTED_PI');
     const expected = { agentDir, modelsPath: path.join(agentDir, 'models.json'), authPath: path.join(agentDir, 'auth.json') };
     assert.deepEqual({ ...override }, expected, 'VM native fixture must match the host storage binding');
     assert.equal(registry.runtime.modelsPath, expected.modelsPath);
@@ -227,7 +228,7 @@ export async function harness(t, { config = baseConfig(), includeNative = false,
   const modules = loadTypeScript(entryFile, {
     'node:fs': boundedFs, 'node:os': { homedir: () => logicalHome ?? home }, '@earendil-works/pi-tui': tui,
     '@earendil-works/pi-coding-agent': { getAgentDir: () => logicalRoot, VERSION: registryVersion },
-    './native-auth.js': syntheticNativeAuth(boundedFs, logicalRoot),
+    './native-auth.js': syntheticNativeAuth(boundedFs, logicalRoot, registryVersion),
     '@earendil-works/pi-ai/providers/all': { getBuiltinProviders: () => ['native-provider'] },
     '../lib/model-pick/protection.js': { createRecordProtection: () => ({
       seal: (value, purpose) => modules.__json(protection.seal(value, purpose)),

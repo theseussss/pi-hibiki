@@ -174,7 +174,7 @@ test('short terminals keep explicit continuation visible without second search/h
   const p = await harness(t, { terminalRows: 10 }); p.action('add-model'); enterIds(p, 'short-first,short-second');
   for (const width of [32, 60, 80]) {
     const lines = p.lines(width); assert.ok(lines.length <= 10); assert.ok(lines.every(l => tui.visibleWidth(l) < width));
-    assert.match(lines.join('\n'), /继续（2）/); assert.doesNotMatch(lines.join('\n'), /输入模型名或渠道名过滤/); assert.equal(lines.filter(l => /Hibiki · 模型工作台/.test(l)).length, 1);
+    assert.match(lines.join('\n'), /继续（2）/); assert.doesNotMatch(lines.join('\n'), /输入模型名或渠道名过滤/); assert.equal(lines.filter(l => /Pi Models · 模型管理/.test(l)).length, 1);
   }
   await saveReferences(p); assert.ok(p.config().providers.p00.models.some(m => m.id === 'short-second'));
 });

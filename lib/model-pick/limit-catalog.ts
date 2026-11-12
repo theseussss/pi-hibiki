@@ -3,6 +3,7 @@
  * or refreshed bases stay unknown; reset deletes fields and lets Pi recompute. */
 import { types } from 'node:util';
 import type { ModelLimitValues } from './store.js';
+import { isVerifiedPiVersion } from './pi-compat.js';
 
 interface RegistryMetadata {
   getRegisteredProviderConfig?(provider: string): unknown;
@@ -30,10 +31,10 @@ function oneChat(models: unknown, id: string): ModelLimitValues | null {
   const matches = Array.prototype.filter.call(models, (m: unknown) => data(m, 'id') === id && (data(m, 'type') === undefined || data(m, 'type') === 'chat'));
   return matches.length === 1 ? limitPair(matches[0]) : null;
 }
-/** Pi 1.4 composes virtual aliases AFTER modelOverrides: writing such an ID is
- * ignored. Explicitly exclude them instead of reporting fictitious success. */
+/** Verified hosts compose virtual aliases AFTER modelOverrides: writing such an
+ * ID is ignored. Exclude them instead of reporting fictitious success. */
 export function isVirtualLimitTarget(registry: unknown, provider: string, id: string, version: string): boolean {
-  if (version !== '1.4.0') return true;
+  if (!isVerifiedPiVersion(version)) return true;
   const virtuals = mapValue(data(data(registry, 'runtime'), 'virtualModels'), provider);
   return types.isMap(virtuals) && !types.isProxy(virtuals) && Map.prototype.has.call(virtuals, id);
 }
@@ -41,7 +42,7 @@ export interface LimitCatalog { catalog: ModelLimitValues | null; catalogNote?: 
 export function readLimitCatalog(registry: RegistryMetadata, provider: string, id: string, version: string,
   hasLocalDefinition: boolean): LimitCatalog {
   const unknown = (catalogNote: string): LimitCatalog => ({ catalog: null, catalogNote });
-  if (version !== '1.4.0') return unknown('未验证此 Pi 版本的基础目录；重置后以重新加载的生效值为准。');
+  if (!isVerifiedPiVersion(version)) return unknown('未验证此 Pi 版本的基础目录；重置后以重新加载的生效值为准。');
   try {
     const registration = registry.getRegisteredProviderConfig?.(provider);
     if (registration) {
@@ -59,7 +60,7 @@ export function readLimitCatalog(registry: RegistryMetadata, provider: string, i
     // getModels/auth/refresh callbacks merely to manufacture a reset preview.
     if (registry.getRegisteredNativeProvider?.(provider)) return unknown('此扩展维护自己的基础目录；重置后以 Pi 生效值为准。');
     if (hasLocalDefinition) return unknown('此模型还有本地基础定义；重置仅移除这两项覆盖，再由 Pi 按定义重新计算。');
-    // Narrow Pi 1.4-only read of the ALREADY LOADED builtin catalog, including
+    // Narrow verified-host read of the ALREADY LOADED builtin catalog, including
     // cached overlays. No bundled-table guess, profile/config read or refresh.
     const builtin = mapValue(data(data(registry, 'runtime'), 'builtins'), provider);
     const getModels = data(builtin, 'getModels');

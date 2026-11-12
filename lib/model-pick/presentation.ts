@@ -1,5 +1,6 @@
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { NativeMenu, type Paint, type MenuAction } from './controls.js';
+import { BRAND, DISPLAY_NAME } from '../identity.js';
 
 export interface SheetRow { label: string; value: string; source?: string; tone?: 'text' | 'accent' | 'success' | 'warning' }
 export interface SheetSection { title?: string; rows?: SheetRow[]; lines?: string[]; tone?: 'text' | 'dim' | 'warning' }
@@ -23,7 +24,7 @@ export function packHints(hints: readonly string[], width: number): string[] {
 export function sheetLines(content: SheetContent, width: number, paint: Paint): { header: string[]; body: string[] } {
   const w = Math.max(1, width - 1); const header: string[] = [];
   const wrap = (value: string, indent = ' ') => wrapTextWithAnsi(value, Math.max(1, w - visibleWidth(indent))).map(line => indent + line);
-  header.push(paint('accent', ' Hibiki · 模型工作台'));
+  header.push(paint('accent', ` ${DISPLAY_NAME}`));
   header.push(paint('dim', ` 添加模型 / ${content.stage}`));
   header.push(...wrap(paint('text', clean(content.title))));
   const body: string[] = [];
@@ -97,7 +98,7 @@ export class ReviewSheet {
     const footer = packHints(['←→ 内容', '↑↓ 操作', 'Enter 确认', 'Esc 返回'], width - 1);
     if (width < 24 || h < header.length + footer.length + 5) {
       this.ready = false;
-      return [this.paint('accent', ' Hibiki'), this.paint('warning', ' 窗口太小，请扩大后继续'), this.paint('dim', ' Esc 返回')].slice(0, h).map(line => truncateToWidth(line, w, ''));
+      return [this.paint('accent', ` ${BRAND}`), this.paint('warning', ' 窗口太小，请扩大后继续'), this.paint('dim', ' Esc 返回')].slice(0, h).map(line => truncateToWidth(line, w, ''));
     }
     const actionRows = Math.min(4, Math.max(1, Math.floor((h - header.length - footer.length - 3) / 3)));
     const menu = this.menu.render(width, actionRows);

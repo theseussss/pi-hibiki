@@ -1,8 +1,8 @@
 {
-  "name": "pi-hibiki",
-  "version": "0.1.8",
+  "name": "pi-models",
+  "version": "0.1.9",
   "private": true,
-  "description": "Hibiki · 模型工作台 — model selection, provider/model management and session Fast policy",
+  "description": "Pi Models — model selection, favorites, provider/model management and session Fast policy",
   "type": "module",
   "license": "MIT",
   "author": "Wang Jiacong (theseussss)",

@@ -72,7 +72,7 @@ for (const [width, height] of [[80, 24], [120, 44], [160, 44]]) test(`HOME fixed
   const p = await open(t, { terminalColumns: width, terminalRows: height });
   const { lines, detailY, actionY, slots } = rail(p), d = p.debug(), v = viewport(p);
   assert.ok(lines.length <= height); assert.ok(lines.every(line => tui.visibleWidth(line) < width));
-  assert.match(lines[0], /Hibiki.*104.*默认.*m8/); assert.ok(lines[2].trim().length > 0, 'native search stays on screen');
+  assert.match(lines[0], /Pi Models.*104.*默认.*m8/); assert.ok(lines[2].trim().length > 0, 'native search stays on screen');
   assert.ok(v.page > 0 && v.page <= 18); assert.equal(v.total, 22);
   if (height === 44) { assert.equal(v.page, 18); assert.ok(lines.length >= 26, 'HOME must not use task .55-height budget'); }
   const byProvider = new Map();
@@ -234,7 +234,10 @@ test('action focus paints exactly one active cursor; matrix anchor/current remai
 test('native typing/IME/paste filter and first arrow immediately navigates, Enter switches exact candidate', async t => {
   const p = await open(t); p.send('p0'); const first = candidate(p); assert.ok(first);
   p.send('down'); const second = candidate(p); assert.notEqual(second.pid, first.pid);
-  p.send('clear'); p.send('\x1b[200~p21\x1b[201~'); const pasted = candidate(p); assert.equal(pasted.pid, 'p21');
+  // Pi's newer fuzzy scorer can match p21 across p02 + a model suffix and
+  // retain that still-valid candidate. Use this provider's unique display label
+  // to test IME/paste/navigation, not an unrelated fuzzy-ranking assumption.
+  p.send('clear'); p.send('\x1b[200~终点\x1b[201~'); const pasted = candidate(p); assert.equal(pasted.pid, 'p21');
   p.send('right'); const target = candidate(p); assert.equal(target.pid, 'p21'); assert.notEqual(target.mid, pasted.mid);
   p.send('enter'); await p.finished;
   assert.deepEqual(p.selections.map(m => [m.provider, m.id]), [[target.pid, target.mid]]); assert.equal(p.calls.length, 0);

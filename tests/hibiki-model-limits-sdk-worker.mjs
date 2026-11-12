@@ -47,10 +47,10 @@ syncBuiltinESMExports();
 
 const sdk = process.env.HIBIKI_PI_ROOT;
 const piVersion = JSON.parse(fs.readFileSync(path.join(sdk, 'package.json'), 'utf8')).version;
-assert.equal(piVersion, '1.4.0', 'This compatibility proof is deliberately pinned to installed Pi 1.4.0');
+assert.ok(['1.4.0', '1.5.2'].includes(piVersion), 'Only explicitly reviewed Pi layouts may pass this compatibility proof');
 const ts = require(path.join(process.env.HIBIKI_TYPESCRIPT_ROOT, 'lib/typescript.js'));
 const emitted = path.join(home, 'compiled'); fs.mkdirSync(emitted);
-for (const name of ['store', 'vault', 'reference', 'limit-catalog']) {
+for (const name of ['store', 'vault', 'reference', 'limit-catalog', 'pi-compat']) {
   const file = path.join(process.env.HIBIKI_PACKAGE_ROOT, 'lib/model-pick', `${name}.ts`);
   fs.writeFileSync(path.join(emitted, `${name}.js`), ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }, fileName: file,

@@ -85,7 +85,7 @@ test('empty matrix permits global actions and cancelled provider form has no sid
 
 test('/models manage enters visible actions without selecting or switching', async t => {
   const p = await harness(t, { args: 'manage' }); assert.equal(p.debug().actionMode, true); home(p);
-  p.send('esc'); assert.equal(p.debug().actionMode, false); assert.match(p.screen(), /Hibiki/); assert.equal(p.selections.length, 0);
+  p.send('esc'); assert.equal(p.debug().actionMode, false); assert.match(p.screen(), /Pi Models/); assert.equal(p.selections.length, 0);
 });
 
 test('provider add coordinates direct key and keyless config, preserving search and private file state', async t => {

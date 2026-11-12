@@ -50,5 +50,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       flags.set(args[i], args[i + 1]);
     }
     console.log(JSON.stringify(importLegacyFast(flags.get('--from'), flags.get('--to'))));
-  } catch (error) { console.error(`Hibiki config import not confirmed: ${error.message}`); process.exitCode = 1; }
+  } catch (error) { console.error(`Pi Models config import not confirmed: ${error.message}`); process.exitCode = 1; }
 }

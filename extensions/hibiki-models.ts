@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import registerPicker, { openPicker, type PickerHostOptions } from "./model-pick.js";
+import registerPicker, { type PickerHostOptions } from "./model-pick.js";
 import { resolvePickerStorage } from "../lib/model-pick/storage-context.js";
 import { registerFastPolicy } from "../lib/fast.js";
 import { getHibikiConfigPath, readHibikiConfig } from "../lib/config.js";
-import { DISPLAY_NAME, VERSION } from "../lib/identity.js";
+import { DISPLAY_NAME } from "../lib/identity.js";
 
 /** The package declares this one public entry; picker and Fast are internal modules. */
 export default function hibikiModelsExtension(pi: ExtensionAPI, options: Pick<PickerHostOptions, "storageOverride"> = {}): void {
@@ -17,25 +17,11 @@ export default function hibikiModelsExtension(pi: ExtensionAPI, options: Pick<Pi
 		if (storage) config = readHibikiConfig(getHibikiConfigPath(storage.agentDir));
 	});
 	const fast = registerFastPolicy(pi, { ultrafastEnabled: () => config.fast.enableUltrafast });
-	registerPicker(pi, { fast, storageOverride: options.storageOverride });
+	const picker = registerPicker(pi, { fast, storageOverride: options.storageOverride });
+	// Keep the old command/entry/config identities; this is a product rename,
+	// not a user-data migration or a second picker/Fast instance.
 	pi.registerCommand("hibiki", {
-		description: `${DISPLAY_NAME}：模型选择、供应商管理与会话 Fast；/hibiki [fast|manage|providers|status|help]`,
-		getArgumentCompletions: (prefix) => ["fast", "manage", "providers", "status", "help"].filter((word) => word.startsWith(prefix)).map((word) => ({ value: word, label: word })),
-		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase();
-			if (action === "status") {
-				ctx.ui.notify(`${DISPLAY_NAME} ${VERSION}\n${fast.describe(ctx)}\n当前/默认模型、焦点候选与会话档位彼此独立。`, "info");
-				return;
-			}
-			if (action === "help") {
-				ctx.ui.notify(`${DISPLAY_NAME}\n/hibiki 或 /models、Ctrl+L：原模型矩阵\n/hibiki fast 或 /models fast：当前会话 Fast 面板\n/fast [on|off|ultrafast|status|check]：原快捷入口，status/check 不发请求\nTab/Shift+Tab：对象与可见动作；Alt+数字直达；Alt+M/F6 进入动作\nAlt+1 收藏；原 Alt+N/X/D/T、调序与会话 Fast 保留\n模型选择与管理沿用原数据和受保护归档，不因品牌改名迁移。`, "info");
-				return;
-			}
-			if (!["", "fast", "manage", "providers"].includes(action)) {
-				ctx.ui.notify("用法：/hibiki [fast|manage|providers|status|help]", "warning");
-				return;
-			}
-			await openPicker(pi, ctx, action === "manage" || action === "providers", action === "providers", fast, action === "fast", options.storageOverride);
-		},
+		...picker,
+		description: `${DISPLAY_NAME}：兼容旧命令；请用 /models [manage|providers|fast|status|help]`,
 	});
 }

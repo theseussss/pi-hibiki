@@ -11,6 +11,7 @@ import type {
 } from './workspace.js';
 import { actionTemplates, commandSlot, commandColumns, compactRows, safe, type ActionSlotSpec } from './layout.js';
 import { homeColumns, homeWindow, homeRule, homeContext, middle } from './home-layout.js';
+import { BRAND, ROLE, DISPLAY_NAME } from '../identity.js';
 
 type View = MatrixSnapshot | PickerTaskSnapshot;
 type Tone = keyof MatrixSnapshot['palette']['colors'];
@@ -399,12 +400,12 @@ export class PickerComponent implements Focusable {
     const line=(text:string)=>' '+truncateToWidth(text,inner,'');
     const fallback=()=>{
       this.ready=false;this.hits=[];this.actionRects=[];this.actionSlots=[];this.matrixCells=[];
-      return ['Hibiki · 模型工作台','窗口太小，请放大；Esc 返回。'].slice(0,height).map(t=>truncateToWidth(t,Math.max(0,w-1),''));
+      return [DISPLAY_NAME,'窗口太小，请放大；Esc 返回。'].slice(0,height).map(t=>truncateToWidth(t,Math.max(0,w-1),''));
     };
     if(w<28)return fallback();
     const rule=homeRule(inner,s.palette.gradient,s.palette.stepped,(color,text)=>this.theme.style(text,{fg:parseColor(color)}));
     const all=s.providers.reduce((n,p)=>n+p.models.length,0),hits=s.visible.reduce((n,p)=>n+p.modelIds.length,0);
-    const title=this.paint('accent','Hibiki')+this.paint('dim',` · 模型工作台 (${s.query.trim()?`${hits}/${all}`:all})${s.default?'  ·  默认 '+safe(s.default.id):''}`);
+    const title=this.paint('accent',BRAND)+this.paint('dim',` · ${ROLE} (${s.query.trim()?`${hits}/${all}`:all})${s.default?'  ·  默认 '+safe(s.default.id):''}`);
     const p=this.rootProvider(),m=this.rootModel();
     const scope=this.frame.actionMode?`操作 ${s.selected.kind==='model'?'模型 '+refLabel(m?.ref??null):'供应商 '+(p?.id??'未选择')} · `:'';
     const detail=scope+(s.selected.kind==='model'&&m?
@@ -607,8 +608,8 @@ export class PickerComponent implements Focusable {
     const size=this.dimensions();if(this.size!==size||this.renderedWidth!==w){this.size=size;this.renderedWidth=w;this.resetReview();this.offsetReveal=true;}
     this.hits=[];this.actionRects=[];this.actionSlots=[];this.matrixCells=[];
     if(this.view.kind==='matrix'&&!this.help)return this.renderHome(w);
-    if(w<28||height<10) {this.ready=false;return ['Hibiki · 模型工作台','窗口太小，请放大；Esc 返回。'].slice(0,height).map(t=>truncateToWidth(t,Math.max(0,w-1),''));}
-    const s=this.state.matrix,brand=this.paint('accent','Hibiki · 模型工作台'),context=this.paint('dim',this.view.kind==='matrix'&&this.frame.actionMode?`操作 ${s.selected.kind==='provider'?'供应商 '+(this.rootProvider()?.name??'未选择'):'模型 '+refLabel(s.selected.kind==='model'?s.selected.ref:null)}`:`当前 ${refLabel(s.current)}`);
+    if(w<28||height<10) {this.ready=false;return [DISPLAY_NAME,'窗口太小，请放大；Esc 返回。'].slice(0,height).map(t=>truncateToWidth(t,Math.max(0,w-1),''));}
+    const s=this.state.matrix,brand=this.paint('accent',DISPLAY_NAME),context=this.paint('dim',this.view.kind==='matrix'&&this.frame.actionMode?`操作 ${s.selected.kind==='provider'?'供应商 '+(this.rootProvider()?.name??'未选择'):'模型 '+refLabel(s.selected.kind==='model'?s.selected.ref:null)}`:`当前 ${refLabel(s.current)}`);
     let header=visibleWidth(brand+' · '+context)<=inner?[brand+' · '+context]:[brand,context];
     const shortTask=height<18&&this.view.kind!=='matrix';
     if(shortTask)header=[brand];

@@ -284,13 +284,14 @@ test('current-supplier guard is repeated after durable journal and before creden
 test('unsupported Pi version and missing native features fail closed in compatibility adapter', async t => {
   const dir = fs.mkdtempSync('/tmp/model-pick-native-features-'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const src = fs.readFileSync(path.join(root, 'lib/model-pick/native-auth.ts'), 'utf8');
-  for (const [version, expected] of [['0.0.0', 'UNSUPPORTED_PI'], ['1.4.0', 'UNSUPPORTED_NATIVE_API']]) {
+  for (const [version, expected] of [['0.0.0', 'UNSUPPORTED_PI'], ['1.5.3', 'UNSUPPORTED_PI'], ['1.4.0', 'UNSUPPORTED_NATIVE_API'], ['1.5.2', 'UNSUPPORTED_NATIVE_API']]) {
     const sub = path.join(dir, version); fs.mkdirSync(path.join(sub, 'dist/core'), { recursive: true });
     fs.writeFileSync(path.join(sub, 'public.js'), `export const VERSION=${JSON.stringify(version)}; export const getPackageDir=()=>${JSON.stringify(sub)}; export const getAgentDir=()=>${JSON.stringify(sub)};`);
     fs.writeFileSync(path.join(sub, 'dist/core/auth-storage.js'), 'export class FileAuthStorageBackend {}');
     const text = src.replace("from '@earendil-works/pi-coding-agent'", `from '${pathToFileURL(path.join(sub, 'public.js')).href}'`);
     const out = ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
     fs.writeFileSync(path.join(sub, 'adapter.js'), out);
+    fs.copyFileSync(path.join(emitted, 'pi-compat.js'), path.join(sub, 'pi-compat.js'));
     const adapter = await import(pathToFileURL(path.join(sub, 'adapter.js')));
     await assert.rejects(adapter.resolveNativeAuth({}, { agentDir: sub, modelsPath: path.join(sub, 'models.json'), authPath: path.join(sub, 'auth.json') }), { code: expected });
     assert.equal(fs.existsSync(path.join(sub, 'auth.json')), false);

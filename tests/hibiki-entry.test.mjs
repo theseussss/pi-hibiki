@@ -17,12 +17,14 @@ function factory(source){
 test('public production factory is lazy and registers only branded contracts with one Fast policy',()=>{
   const p=factory(path.join(variantRoots().productionRoot,'extensions/hibiki-models.ts'));
   assert.deepEqual(p.registrations.map(r=>r.name),['fast','models','ctrl+l','hibiki']);
-  for(const item of p.registrations.filter(r=>r.name!=='fast'))assert.match((item.command??item.shortcut).description,/Hibiki · (?:模型工作台|打开模型矩阵)/);
+  for(const item of p.registrations.filter(r=>r.name!=='fast'))assert.match((item.command??item.shortcut).description,/Pi Models · (?:模型管理|打开模型矩阵)/);
+  const models=p.registrations.find(r=>r.name==='models').command,legacy=p.registrations.find(r=>r.name==='hibiki').command;
+  assert.equal(legacy.handler,models.handler);assert.equal(legacy.getArgumentCompletions,models.getArgumentCompletions);
   assert.equal(p.hooks.filter(h=>h.name==='session_start').length,2);
   assert.equal(p.hooks.filter(h=>h.name==='before_provider_request').length,1);assert.equal(p.hooks.filter(h=>h.name==='provider_stream_event').length,1);
 });
-test('one declared public entry and no metadata/storage rename masquerading as branding',()=>{
-  const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json')));assert.equal(pkg.name,'pi-hibiki');assert.equal(pkg.private,true);assert.deepEqual(pkg.pi.extensions,['./extensions/hibiki-models.ts']);
+test('Pi Models package has one compatible entry and keeps existing storage/crypto identities',()=>{
+  const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json')));assert.equal(pkg.name,'pi-models');assert.equal(pkg.private,true);assert.deepEqual(pkg.pi.extensions,['./extensions/hibiki-models.ts']);
   const picker=fs.readFileSync(path.join(root,'extensions/model-pick.ts'),'utf8');
   for(const name of ['order','favorites','theme'])assert.ok(picker.includes(`ancillary('${name}')`));
   assert.ok(picker.includes('settings.json'));assert.ok(picker.includes('.bak-model-pick.sealed'));
@@ -44,11 +46,11 @@ test('unknown SDK session startup never reads default HOME and rejects restored 
 });
 test('branded help/status/completions stay headless and expose accepted controls without old menus',async()=>{
   const p=factory(path.join(variantRoots().productionRoot,'extensions/hibiki-models.ts'));
-  const notices=[],command=p.registrations.find(r=>r.name==='hibiki').command;
+  const notices=[],command=p.registrations.find(r=>r.name==='models').command;
   assert.deepEqual(Array.from(command.getArgumentCompletions('p'),x=>x.value),['providers']);
   const ctx={hasUI:false,mode:'rpc',modelRegistry:{},sessionManager:{getBranch:()=>[]},ui:{notify:message=>notices.push(message)}};
   await command.handler('help',ctx);assert.match(notices.at(-1),/Tab\/Shift\+Tab.*对象.*动作/);assert.match(notices.at(-1),/Alt\+1 收藏/);assert.doesNotMatch(notices.at(-1),/Tab.*收藏|更多…/);
-  await command.handler('status',ctx);assert.match(notices.at(-1),/当前\/默认模型.*候选/);
+  await command.handler('status',ctx);assert.match(notices.at(-1),/Pi Models · 模型管理 0\.1\.9/);assert.match(notices.at(-1),/当前\/默认模型.*候选/);
   await command.handler('invalid',ctx);assert.match(notices.at(-1),/用法/);
   for(const action of ['', 'manage', 'providers', 'fast']){await command.handler(action,ctx);assert.match(notices.at(-1),/需要交互模式/);}
 });

@@ -54,7 +54,7 @@ test('actual production factory registers in an ordinary logical HOME without re
 
 test('actual production Alt+N adds a model through real controls/store, retaining query, current/default and existing data', async (t) => {
   const p = await production(t); const before = p.config(); const defaultBefore = settings(p); const currentBefore = p.current();
-  assert.match(p.screen(), /Hibiki · 模型工作台/); assert.match(p.screen(), /添加模型 \[7\]/); assert.doesNotMatch(p.screen(), /Alt\+A/);
+  assert.match(p.screen(), /Pi Models · 模型管理/); assert.match(p.screen(), /添加模型 \[7\]/); assert.doesNotMatch(p.screen(), /Alt\+A/);
   p.type('p0'); p.send('down'); const matrix = p.raw();
   p.send('\x1bn'); assert.equal(p.debug().view, 'basket'); p.type('cancelled-draft'); p.action('back'); assert.equal(p.raw(), matrix);
   assert.deepEqual(p.config(), before);
@@ -62,7 +62,7 @@ test('actual production Alt+N adds a model through real controls/store, retainin
   assert.deepEqual(p.config(), before, 'picking is not save consent'); p.action('next-models'); p.action('skip'); p.action('commit'); p.action('commit'); await p.settled();
   const after = p.config(); assert.equal(after.providers.p01.models.at(-1).id, 'production-model');
   assert.deepEqual(after.providers.p01.models.slice(0, -1), before.providers.p01.models); assert.deepEqual(after.providers.p00, before.providers.p00); assert.deepEqual(after.futureRoot, before.futureRoot);
-  assert.match(p.screen(), /Hibiki · 模型工作台/); assert.equal(query(p), 'p0'); assert.equal(settings(p), defaultBefore); assert.deepEqual(p.current(), currentBefore);
+  assert.match(p.screen(), /Pi Models · 模型管理/); assert.equal(query(p), 'p0'); assert.equal(settings(p), defaultBefore); assert.deepEqual(p.current(), currentBefore);
   assert.ok(p.protection.state.seals.length > 0, 'actual store writes use mocked protection, not a stubbed mutation');
   assert.ok(fs.existsSync(path.join(p.root, 'model-pick-data/vault.auto.json'))); assertSyntheticOnly(p);
 });
@@ -79,7 +79,7 @@ test('actual production provider-focus Alt+N creates a supplier and models witho
   assert.equal(created.name, 'Production Bridge'); assert.equal(created.baseUrl, 'https://production-synthetic.test/v1'); assert.equal('apiKey' in created, false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(p.root, 'auth.json'), 'utf8'))['production-bridge'].key, 'SYNTHETIC_PRODUCTION_KEY');
   assert.deepEqual(created.models.map((model) => model.id), ['production-first', 'production-second']); assert.deepEqual(after.providers.p00, before.providers.p00); assert.deepEqual(after.providers.p01, before.providers.p01); assert.deepEqual(after.futureRoot, before.futureRoot);
-  assert.match(p.screen(), /Hibiki · 模型工作台/); assert.equal(query(p), 'p0'); assert.equal(settings(p), defaultBefore); assert.deepEqual(p.current(), currentBefore); assertSyntheticOnly(p);
+  assert.match(p.screen(), /Pi Models · 模型管理/); assert.equal(query(p), 'p0'); assert.equal(settings(p), defaultBefore); assert.deepEqual(p.current(), currentBefore); assertSyntheticOnly(p);
 });
 
 test('production has no Alt+A fallback alias in either model or supplier focus, including enhanced keys', async (t) => {
@@ -88,7 +88,7 @@ test('production has no Alt+A fallback alias in either model or supplier focus, 
     if (providerFocus) { p.send('left'); p.send('left'); }
     const matrix = p.raw();
     for (const key of ['\x1ba', '\x1b[97;3u']) { p.send(key); assert.equal(p.raw(), matrix); }
-    assert.match(p.screen(), /Hibiki · 模型工作台/); assert.doesNotMatch(p.screen(), /搜索或输入模型 ID|名称:/); assert.deepEqual(p.config(), before);
+    assert.match(p.screen(), /Pi Models · 模型管理/); assert.doesNotMatch(p.screen(), /搜索或输入模型 ID|名称:/); assert.deepEqual(p.config(), before);
   }
   assert.equal(settings(p), defaultBefore); assert.equal(p.protection.state.seals.length, 0); assert.ok(!fs.existsSync(path.join(p.root, 'model-pick-data'))); assertSyntheticOnly(p);
 });
@@ -96,7 +96,7 @@ test('production has no Alt+A fallback alias in either model or supplier focus, 
 test('production paste cannot turn the new dangerous Alt+N key into add/remove/cancel commands', async (t) => {
   const p = await production(t); const before = p.config(); const defaultBefore = settings(p); let finished = false;
   p.finished.then(() => { finished = true; }); p.send('\x1b[200~synthetic-query'); p.send('\x1bn'); p.send('\x1bx'); p.send('cancel'); p.send('\x1b[201~'); await p.flush();
-  assert.equal(finished, false); assert.match(p.screen(), /Hibiki · 模型工作台/); assert.doesNotMatch(p.screen(), /搜索或输入模型 ID|名称:/); assert.deepEqual(p.config(), before); assert.equal(settings(p), defaultBefore);
+  assert.equal(finished, false); assert.match(p.screen(), /Pi Models · 模型管理/); assert.doesNotMatch(p.screen(), /搜索或输入模型 ID|名称:/); assert.deepEqual(p.config(), before); assert.equal(settings(p), defaultBefore);
   assert.equal(p.protection.state.seals.length, 0); assert.ok(!fs.existsSync(path.join(p.root, 'model-pick-data'))); assertSyntheticOnly(p);
 });
 

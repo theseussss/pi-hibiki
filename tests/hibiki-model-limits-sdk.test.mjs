@@ -9,7 +9,7 @@ import { root, piRoot, typescriptPath } from '../scripts/tooling.mjs';
 // Never import/create the SDK runtime in this parent. Each proof runs in its own
 // allowlisted environment, fresh HOME/profile, offline and network-denied child.
 const scenarios = [
-  ['builtin', 'actual Pi 1.4 builtin openai-codex overrides are topmost without replacing the catalog'],
+  ['builtin', 'actual verified Pi builtin openai-codex overrides are topmost without replacing the catalog'],
   ['directory', 'actual Pi offline cached directory changes are inherited after resetting one/both fields'],
   ['legacy', 'actual Pi registered legacy extension overrides beat local definitions and inherit fresh registrations'],
   ['native', 'actual Pi registered native extension metadata receives overrides and fresh reset inheritance'],
@@ -34,7 +34,8 @@ for (const [scenario, title] of scenarios) test(title, t => {
   assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
   assert.equal(result.signal, null);
   const proof = JSON.parse(result.stdout.trim().split('\n').at(-1));
-  assert.equal(proof.scenario, scenario); assert.equal(proof.status, 'PASS'); assert.equal(proof.piVersion, '1.4.0');
+  assert.equal(proof.scenario, scenario); assert.equal(proof.status, 'PASS');
+  assert.equal(proof.piVersion, JSON.parse(fs.readFileSync(path.join(piRoot(), 'package.json'), 'utf8')).version);
   assert.equal(proof.offline, true); assert.equal(proof.sanitizedEnvironment, true);
   for (const counter of ['networkAttempts', 'requestAuthCalls', 'credentialFileAccesses', 'childProcessAttempts', 'routeCalls']) assert.equal(proof[counter], 0, counter);
   assert.equal(proof.unusedCliProfileUntouched, true); assert.equal(proof.memoryCredentialsUnchanged, true);

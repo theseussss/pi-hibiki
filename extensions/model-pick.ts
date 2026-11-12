@@ -1,4 +1,4 @@
-/** Hibiki host: real registry, durable matrix state and task effects.
+/** Pi Models host: real registry, durable matrix state and task effects.
  * The V10-derived PickerComponent is the sole renderer/input owner. */
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -9,6 +9,7 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { FastController } from '../lib/fast.js';
+import { BRAND, DISPLAY_NAME, VERSION as PICKER_VERSION } from '../lib/identity.js';
 import { PickerComponent } from '../lib/model-pick/component.js';
 import { PickerActions, type ActionTarget, type ModelLimitsHost } from '../lib/model-pick/panel.js';
 import { PickerStore, StoreError, type Guard } from '../lib/model-pick/store.js';
@@ -229,22 +230,9 @@ export async function openPicker(pi: ExtensionAPI, ctx: ExtensionContext, initia
   const current = refOf(ctx.model);
   if (current && rows.some(r=>sameRef(r,current))) selected = initialProviderFocus ? {kind:'provider',provider:current.provider} : {kind:'model',ref:current};
   else if (browse[0]) selected = initialProviderFocus || !browse[0].models.length ? {kind:'provider',provider:browse[0].provider} : {kind:'model',ref:{provider:browse[0].provider,id:browse[0].models[0]!.id}};
-  // Retain archived/temporarily unavailable identities. Cleanup is fail-closed.
-  if (storage && store && writable && configReadable && orderReadable && favoritesReadable) {
-    try {
-      const retained = store.retained(), liveP = new Set([...browse.map(p=>p.provider),...retained.providers]), liveM = new Set([...rows.map(r=>r.fullId),...retained.models]);
-      try { const catalog = readJson(path.join(storage.agentDir,'models-store.json'));
-        for (const [p,cfg] of Object.entries(catalog ?? {})) { liveP.add(p); for (const m of Array.isArray((cfg as any)?.models) ? (cfg as any).models : []) { const id = typeof m==='string'?m:m?.id; if (typeof id==='string') liveM.add(`${p}/${id}`); } }
-      } catch(e) { if ((e as NodeJS.ErrnoException).code!=='ENOENT') throw e; }
-      const beforeOrder = JSON.stringify(order), beforeFav = JSON.stringify([...favorites]);
-      if (order.providers) order.providers = order.providers.filter(p=>liveP.has(p));
-      if (order.models) order.models = Object.fromEntries(Object.entries(order.models).filter(([p])=>liveP.has(p)).map(([p,ids])=>[p,ids.filter(id=>liveM.has(`${p}/${id}`))]));
-      favorites = new Set([...favorites].filter(id=>liveM.has(id)));
-      if (JSON.stringify(order)!==beforeOrder) writeJson(ancillary('order'),order);
-      if (JSON.stringify([...favorites])!==beforeFav) writeJson(ancillary('favorites'),[...favorites]);
-      refreshRows();
-    } catch { /* Retention/config trouble must not trigger destructive cleanup. */ }
-  }
+  // Opening a partial/offline catalog is not consent to prune preferences.
+  // Unavailable, unconfigured and archived identities may return after a host
+  // update/login; preserve their favorites/order until an explicit user action.
   const target = (): ActionTarget => selected.kind==='model' ? {kind:'model',provider:selected.ref.provider,modelId:selected.ref.id} : selected.kind==='provider' ? {kind:'provider',provider:selected.provider} : {};
   const pending = () => { if (!store) return false; try { return store.hasPending(); } catch { return true; } };
   // Rendering/fuzzy search consume cached metadata. Durable guards below still
@@ -378,7 +366,7 @@ export async function openPicker(pi: ExtensionAPI, ctx: ExtensionContext, initia
     });
     return {kind:'matrix',viewId,reviewToken:null,providers,visible:visible.map(p=>({provider:p.provider,modelIds:p.models.map(m=>m.id)})),query,selected,current:cur,default:defaults.ref,defaultKnown:defaults.known,busy:!!guard.busy,configReadable,
       palette:palette(paletteIndex,isLightTheme()),fast:{current:cur,modelLabel:clean(session?.modelLabel??(cur?fid(cur):'未选择模型')),tier:session?.tier??'off',supported:session?.supported??false,active:session?.active??false,ultrafastEnabled:session?.ultrafastEnabled??false},
-      undo:actions?.undoLabel?{identity:'undo',label:clean(actions.undoLabel)}:null,locate,actions:list,message:message||(!storage?'无法验证此 SDK 的存储绑定：仅查看/切换；未读取默认 profile。':!writable?'存储兼容性未确认：修改已禁用。':undefined),error:error||undefined};
+      undo:actions?.undoLabel?{identity:'undo',label:clean(actions.undoLabel)}:null,locate,actions:list,message:message||(!storage?'无法验证此 SDK 的存储绑定：仅查看/切换；未读取默认 profile。':!writable?`Pi ${VERSION} 存储写入兼容性未确认；收藏／排序仍可查看，修改已禁用。`:undefined),error:error||undefined};
   }
   async function activate(command: Extract<PickerCommand,{type:'activate'}>) {
     const t = target(), ref = selected.kind==='model'?{...selected.ref}:null;
@@ -524,10 +512,22 @@ export async function openPicker(pi: ExtensionAPI, ctx: ExtensionContext, initia
 }
 
 export default function modelPickExtension(pi:ExtensionAPI,options:PickerHostOptions={}) {
-  pi.registerCommand('models',{
-    description:'Hibiki · 模型工作台：Tab 切换对象/动作；Alt+数字直达；Alt+T 配色',
-    handler:async(args,ctx)=>{const action=args.trim().toLowerCase();if(action&&!['manage','providers','fast'].includes(action)){ctx.ui.notify('用法：/models [manage|providers|fast]','info');return;}
-      await openPicker(pi,ctx,action==='manage'||action==='providers',action==='providers',options.fast,action==='fast',options.storageOverride);},
-  });
-  pi.registerShortcut('ctrl+l',{description:'Hibiki · 打开模型矩阵',handler:async ctx=>{await openPicker(pi,ctx,false,false,options.fast,false,options.storageOverride);}});
+  const command: Parameters<ExtensionAPI['registerCommand']>[1] = {
+    description:`${DISPLAY_NAME}：Tab 切换对象/动作；Alt+数字直达；/models [manage|providers|fast|status|help]`,
+    getArgumentCompletions:prefix=>['fast','manage','providers','status','help'].filter(word=>word.startsWith(prefix)).map(word=>({value:word,label:word})),
+    handler:async(args,ctx)=>{
+      const action=args.trim().toLowerCase();
+      if(action==='status') {
+        ctx.ui.notify(`${DISPLAY_NAME} ${PICKER_VERSION}\nPi ${VERSION}\n${options.fast?.describe(ctx)??'Fast 未启用。'}\n当前/默认模型、焦点候选与会话档位彼此独立。`,'info');return;
+      }
+      if(action==='help') {
+        ctx.ui.notify(`${DISPLAY_NAME}\n/models、Ctrl+L：模型矩阵；/hibiki 保留为旧命令别名\n/models fast：当前会话 Fast 面板\n/fast [on|off|ultrafast|status|check]：会话快捷入口，status/check 不发请求\nTab/Shift+Tab：对象与可见动作；Alt+数字直达；Alt+M/F6 进入动作\nAlt+1 收藏；原 Alt+N/X/D/T、调序与会话 Fast 保留\n原收藏、排序、配置路径及受保护归档不因改名迁移。`,'info');return;
+      }
+      if(action&&!['manage','providers','fast'].includes(action)){ctx.ui.notify('用法：/models [manage|providers|fast|status|help]','info');return;}
+      await openPicker(pi,ctx,action==='manage'||action==='providers',action==='providers',options.fast,action==='fast',options.storageOverride);
+    },
+  };
+  pi.registerCommand('models',command);
+  pi.registerShortcut('ctrl+l',{description:`${BRAND} · 打开模型矩阵`,handler:async ctx=>{await openPicker(pi,ctx,false,false,options.fast,false,options.storageOverride);}});
+  return command;
 }

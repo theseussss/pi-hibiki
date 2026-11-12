@@ -21,6 +21,7 @@ test('real installed loader/runner/SessionManager/TUI compose one Hibiki, preser
   assert.equal(summary.native,'PASS');assert.equal(summary.authCalls,0);assert.equal(summary.realNetworkRequests,0);
   assert.equal(summary.policyHooks,1);assert.equal(summary.observerHooks,1);assert.equal(summary.currentDefaultUnchanged,true);assert.equal(summary.branchRestore,true);
   assert.equal(summary.nativeOverlayMounted,true);assert.deepEqual(summary.themeAppearances,['dark','light']);assert.equal(summary.nondefaultProfile,true);
+  assert.equal(summary.realFileBackedRuntime,true);assert.equal(summary.favoritesRestored,true);assert.equal(summary.orderRestored,true);
   assert.deepEqual(summary.overlay,{anchor:'bottom-center',width:'100%',maxHeight:'100%',margin:0});
   assert.ok(summary.frames.every(frame=>frame.lines.length>0));
   for (const name of ['wizard-preflight','wizard-report','wizard-detail']) assert.ok(summary.frames.some(frame => frame.name === name), `missing ${name}`);

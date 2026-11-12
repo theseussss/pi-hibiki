@@ -1,22 +1,24 @@
-# Hibiki · Model Workspace
+# Pi Models · Model Manager
 
 [简体中文](README.zh-CN.md)
 
 A third-party [Pi](https://pi.dev) extension for selecting models, managing custom providers/models, and controlling the current session's Fast request policy. The interface is primarily Chinese.
 
-**0.1.8** preserves the approved 0.1.7 dense home and add flow, and lets users locally override native/extension chat-model context and output limits or restore inheritance. The home retains one provider per row, row-local horizontal windows, persistent search/details and interactive bottom actions; filtering and manual IDs remain separate. Source delivery, local installation/loading and GitHub publication remain separate steps; editing this repository does not upgrade already-open windows.
+**0.1.9** renames Hibiki to **Pi Models** and adds Pi 1.5.2 compatibility. Favorites/order/preferences no longer disappear merely because credential-write compatibility is unverified. The dense home, add flow, native context/output overrides and separate save confirmation are retained. Source delivery, local installation/loading and GitHub publication remain separate steps; editing this repository does not upgrade already-open windows.
+
+The package name is now `pi-models`. Existing commands, entry/config filenames, favorite/order paths and protected-record identifiers remain compatible; no user-data migration is needed. Merely opening a partial catalog no longer prunes preferences for absent providers/models.
 
 ## Installation and entry points
 
 This is an ordinary editable TypeScript Pi package with one declared entry: `extensions/hibiki-models.ts`. No build, snapshot or source reconstruction is required. Do not load internal `extensions/model-pick.ts` separately, or stack the old standalone picker/Fast extensions with it.
 
-After reviewing a local source package, use `pi install /absolute/path/to/pi-hibiki` if desired. This repair does not automatically change existing loading configuration or reload windows. The remote address is `git:github.com/theseussss/pi-hibiki`; unpublished local changes are not present in that remote version.
+After reviewing a local source package, use `pi install /absolute/path/to/checkout` if desired. This repair does not automatically change existing loading configuration or reload windows. The repository/install address remains `git:github.com/theseussss/pi-hibiki`; the product rename does not rename that remote, and unpublished local changes are not present there.
 
-The compatibility target is **Node.js 24 and Pi 1.4.0**. Shared credential locking uses an explicitly version-checked host adapter. Unknown Pi versions or unverifiable SDK storage bindings disable management writes rather than guessing a HOME directory.
+Verified host targets are **Node.js 24 and Pi 1.4.0 / 1.5.2**. Shared credential locking and native metadata editing retain an explicit reviewed-version/API boundary. With an exact file-backed profile binding, saved favorites, order, palette and defaults remain readable even when writes are disabled on an unverified Pi version. Unverifiable SDK storage bindings still never fall back to a guessed HOME profile.
 
 ## Everyday controls
 
-`/hibiki` and `/models` open the matrix. `/hibiki manage` and `/hibiki providers` focus the visible action strip. `/hibiki fast` or `/models fast` opens current-session policy. `/hibiki status` and `/hibiki help` provide version/help information.
+`/models` opens the matrix. `/models manage` and `/models providers` focus the visible action strip. `/models fast` opens current-session policy; `/models status` and `/models help` provide version/help information. `/hibiki` remains an exact legacy alias with the same subcommands; Ctrl+L and `/fast` are unchanged.
 
 - **Home Tab/Shift+Tab** switches between the selected object and actions. Arrows navigate; Enter selects a model. Candidate, current session and global default are separate identities.
 - **Alt+digits** invoke visible numbered actions: 1 favorite, 2 edit/view, 3 full checks, 4 default, 5/6 reorder, 7 add model, 8 remove confirmation, 9 new provider, 0 removed items. Unmodified digits remain text.
@@ -25,7 +27,7 @@ The compatibility target is **Node.js 24 and Pi 1.4.0**. Shared credential locki
 - Alt+N/X/E/V/D, Alt+arrows, Alt+Z undo, Alt+L explicit locate, Alt+T six palettes, Alt+M/F6 actions and F1/Alt+H help remain. Saving does not silently clear a query, locate additions, change the current model or set a default.
 - Wider terminals admit more action columns; state changes at the same width do not move commands. The home catalog retains one provider per row, middle ellipsis, a row-local horizontal window and `‹`/`+N`. Only provider rows page/scroll; title/search/details/actions remain visible. It is neither independent full-width row justification nor a provider-wrapping long list. Narrow/short screens retain reading gates and keyboard paths.
 
-Ctrl+L may collide with Pi's native model picker. To assign it to Hibiki, merge `"app.model.select": []` into the existing keybindings file; do not overwrite the entire file. Commands work without that change.
+Ctrl+L may collide with Pi's native model picker. To assign it to Pi Models, merge `"app.model.select": []` into the existing keybindings file; do not overwrite the entire file. Commands work without that change.
 
 ## Add, check and confirm
 
@@ -71,9 +73,9 @@ Select a native/extension chat model such as `openai-codex`, then use the same *
 - Direct keys share Pi's **`auth.json`** with `/login`. It is **0600 plaintext**, not an extra encrypted credential vault. New keys are not added to `models.json`. Dollar signs/leading exclamation are encoded for Pi's literal config-value syntax without executing pasted input.
 - Existing OAuth/non-API-key entries are not overwritten; unrelated providers and unknown API-key metadata are preserved. No master password or parallel active-key store is introduced.
 - Provider/auth changes use coordinated commit, native-compatible leases, revision checks and protected pending recovery data. **This is not a cross-file atomic transaction.** Outcomes distinguish unchanged/compensated, pending, committed and saved-but-not-refreshed. Partial work is not presented as nothing having happened.
-- Unresolved or unreadable pending state blocks Hibiki's relevant mutation, selection and discovery/probe effects until explicit recovery. External login changes are not blindly overwritten.
+- Unresolved or unreadable pending state blocks Pi Models' relevant mutation, selection and discovery/probe effects until explicit recovery. External login changes are not blindly overwritten.
 - Endpoint/API/key changes for the **current provider are refused** until switching away; name-only edits are allowed. Saving current-model metadata refreshes its canonical object only while it is still current, preserving an intervening model selection.
-- This is not a global request lock across processes. Hibiki cannot freeze/rebind other windows, other extensions or direct file editors. Local coordination does not guarantee cross-window endpoint/key binding or absolute filesystem CAS.
+- This is not a global request lock across processes. Pi Models cannot freeze/rebind other windows, other extensions or direct file editors. Local coordination does not guarantee cross-window endpoint/key binding or absolute filesystem CAS.
 - Removal archives rather than permanently deletes. Affected current/default references require replacement confirmation and then separate removal confirmation. Undo/restore never silently switch current/default; conflicts do not overwrite, and legacy data is not automatically migrated/deleted.
 
 ## Platform and scope limits
